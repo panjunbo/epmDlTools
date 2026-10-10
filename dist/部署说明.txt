@@ -1,0 +1,43 @@
+download_tools 部署说明（onefile 单文件模式）
+==========================================
+
+【分发方式】
+
+  只需复制一个文件:
+
+    download_tools.exe
+
+  无需 _internal 目录。可直接放在 bat 同级目录替换旧 exe。
+
+【目标电脑要求】
+
+  - Windows 10 64 位或更高（Python 3.14 不支持 Win7/Win8.1）
+  - 64 位系统（本包为 x64 编译）
+  - 建议安装：Microsoft Visual C++ 2015-2022 Redistributable (x64)
+    下载：https://aka.ms/vs/17/release/vc_redist.x64.exe
+
+【运行说明】
+
+  - 首次启动会在 %TEMP%\_MEIxxxxx 临时解压运行时文件，属正常现象
+  - bat 连续多次调用时，启动比 onedir 模式稍慢（每次进程都要解压）
+  - GUI 模式（--ui）运行时配置写入 exe 同目录 dlTools_cfg\config\
+
+【常见错误】
+
+  Failed to load Python DLL ... python314.dll
+  LoadLibrary: 找不到指定的模块
+
+  可能原因：
+  1. 目标系统是 32 位 Windows
+  2. 目标系统是 Win7/Win8，不支持 Python 3.14
+  3. 缺少 VC++ 运行库（安装上方 redistributable）
+  4. 杀毒软件拦截 exe 或临时解压目录
+  5. exe 拷贝不完整（文件大小应约 15MB+）
+
+【自检】
+
+  在 download_tools.exe 同目录运行 verify_download_tools.bat
+
+【兼容性更好的打包方式】
+
+  若需在更多旧电脑运行，请用 Python 3.12 x64 重新执行 build_download_tools.bat 打包。

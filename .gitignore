@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+.eggs/
+dist/*
+!dist/verify_download_tools.bat
+!dist/部署说明.txt
+build/
+
+# Local config (copy config.example.ini to config/config.ini)
+config/config.ini
+
+# Logs and runtime data
+logs/
+bin/readback/
+
+# IDE / OS
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+Desktop.ini
+
+# Secrets
+.env
+.env.*

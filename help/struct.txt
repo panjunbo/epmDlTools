@@ -1,0 +1,38 @@
+epmDlTools/
+├── epmDlTool.py                 主入口 (CLI 子命令 + --ui)
+├── commands/
+│   ├── base.py                  Command 基类 + SerialManager
+│   ├── flashload.py             Flash 擦/写/读
+│   ├── programmer.py            烧录 programmer
+│   └── ota.py                   OTA (占位)
+├── communication/
+│   ├── interface.py             CommunicationInterface
+│   ├── uart_comm.py             UartComm
+│   ├── spi_comm.py              SpiComm (延迟加载)
+│   ├── i2c_comm.py              I2cComm (延迟加载)
+│   ├── log_serial.py            LogSerial
+│   └── __init__.py              工厂 create()
+├── protocol/
+│   ├── frame.py                 帧编/解码
+│   ├── flashload_protocol.py    Flashload 状态机
+│   └── programmer_protocol.py   Programmer 状态机
+├── utils/
+│   ├── config_manager.py        config.ini + cores/presets
+│   ├── crc.py                   CRC (pycrc)
+│   ├── bin_parse.py             bin 读/写
+│   └── logger.py                双通道 Logger (regular / id)
+├── ui/
+│   ├── app.py                   Tkinter 主窗口 + 菜单 + 多核调度
+│   ├── serial_panel.py          串口配置 + 单 toggle 按钮 + 参数弹窗
+│   ├── serial_assistant.py      串口助手（接收=日志/发送/列表发送默认隐藏）
+│   └── download_panel.py        下载目录 + 多核列表
+├── config/
+│   └── config.ini               serial / bins / id_log / presets / ui
+├── doc/
+│   ├── require.md               需求文档
+│   ├── design.md                架构设计
+│   └── usage.md                 使用说明
+├── help/
+│   └── struct.txt               本目录结构
+└── tests/
+    └── smoke_protocol.py        协议冒烟测试
