@@ -41,6 +41,9 @@ class ConfigManager:
         except (configparser.NoSectionError, configparser.NoOptionError):
             return default
 
+    def has_option(self, section: str, key: str) -> bool:
+        return self._parser.has_option(section, key)
+
     def get_int(self, section: str, key: str, default: int = 0) -> int:
         v = self.get(section, key, None)
         if v is None:
@@ -112,6 +115,8 @@ class ConfigManager:
             "ui": {
                 "theme": "light",
                 "auto_scroll": "true",
+                "recv_font_size": "10",
+                # hpaned_sash_ratio：不设默认；缺失时用控件宽度算法，拖拽关闭后才写入
                 "window_geometry": "1100x700",
                 "find_history": "",
                 "find_case_sensitive": "false",

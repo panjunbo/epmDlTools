@@ -344,23 +344,58 @@ class EpmDlApp(tk.Tk):
 
     def _set_initial_pane_positions(self):
         self._set_hpaned_initial_position()
-        self.assistant.apply_recv_send_split()
+        self._set_recv_send_initial_position()
+
+    def _set_recv_send_initial_position(self):
+        ratio = None
+        if self.cm.has_option("ui", "recv_send_sash_ratio"):
+            raw = self.cm.get("ui", "recv_send_sash_ratio", "")
+            try:
+                ratio = float(raw)
+            except (TypeError, ValueError):
+                ratio = None
+        self.assistant.apply_recv_send_split(ratio)
 
     def _set_hpaned_initial_position(self):
         try:
             self.update_idletasks()
             total = self.hpaned.winfo_width()
+            if total <= 200:
+                return
             right_need = self._right_frame.winfo_reqwidth() + scale_px(self, 8)
             left_need = scale_px(self, 200)
             try:
                 left_need = self.assistant._toolbar1.winfo_reqwidth() + scale_px(self, 8)
             except Exception:
                 pass
-            pos = initial_h_sash(total, right_need, left_need)
-            if total > 200:
-                self.hpaned.sashpos(0, pos)
+            # 仅当 ini 里显式写过比例时恢复；不要用 ensure_defaults 的占位值
+            # 覆盖用户拖拽结果。恢复时只用软下限，避免 right_need 把窄配置区撑回去。
+            ratio = None
+            if self.cm.has_option("ui", "hpaned_sash_ratio"):
+                raw = self.cm.get("ui", "hpaned_sash_ratio", "")
+                try:
+                    ratio = float(raw)
+                except (TypeError, ValueError):
+                    ratio = None
+            if ratio is not None:
+                ratio = max(0.2, min(ratio, 0.85))
+                left_min = scale_px(self, 200)
+                right_min = scale_px(self, 280)
+                pos = max(left_min, min(int(total * ratio), total - right_min))
+            else:
+                pos = initial_h_sash(total, right_need, left_need)
+            self.hpaned.sashpos(0, pos)
         except Exception:
             pass
+
+    def _get_hpaned_sash_ratio(self) -> Optional[float]:
+        try:
+            total = self.hpaned.winfo_width()
+            if total <= 200:
+                return None
+            return self.hpaned.sashpos(0) / float(total)
+        except Exception:
+            return None
 
     def _apply_cfg_to_ui(self):
         sp = self.serial_panel
@@ -426,6 +461,11 @@ class EpmDlApp(tk.Tk):
         self.assistant.set_find_case_sensitive(find_case in ("1", "true", "yes", "on"))
         self.assistant.auto_scroll.set(
             self._cfg_bool(self.cm.get("ui", "auto_scroll", "true"), default=True))
+        try:
+            font_size = int(self.cm.get("ui", "recv_font_size", "10"))
+        except (TypeError, ValueError):
+            font_size = 10
+        self.assistant.set_recv_font_size(font_size)
 
     @staticmethod
     def _cfg_bool(val, default: bool = False) -> bool:
@@ -485,6 +525,16 @@ class EpmDlApp(tk.Tk):
             "ui", "auto_scroll",
             "true" if self.assistant.auto_scroll.get() else "false",
         )
+        self.cm.set(
+            "ui", "recv_font_size",
+            str(self.assistant.get_recv_font_size()),
+        )
+        sash_ratio = self._get_hpaned_sash_ratio()
+        if sash_ratio is not None:
+            self.cm.set("ui", "hpaned_sash_ratio", f"{sash_ratio:.4f}")
+        recv_ratio = self.assistant.get_recv_send_ratio()
+        if recv_ratio is not None:
+            self.cm.set("ui", "recv_send_sash_ratio", f"{recv_ratio:.4f}")
 
     def _load_bin_selection(self):
         """从 ini 读出勾选意图。界面是否勾上由 refresh 再看文件是否存在。"""

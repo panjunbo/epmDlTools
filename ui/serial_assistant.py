@@ -14,6 +14,9 @@ _TEXT_INSERT_LINES = 400
 _RECV_TEXT_MAX_CHARS = 512 * 1024
 _APPEND_BATCH = 32
 _SAVE_FLUSH_LINES = 32
+_RECV_FONT_DEFAULT = 10
+_RECV_FONT_MIN = 8
+_RECV_FONT_MAX = 28
 
 from communication import UartComm
 from .theme import get_ui_fonts
@@ -25,13 +28,13 @@ class SerialAssistant(ttk.PanedWindow):
     DEFAULT_RECV_RATIO = 0.68
 
     LEVEL_COLOR = {
-        "INFO": "#222",
+        "INFO": "#7c3aed",   # 非 ID：原 ID_B 紫
         "WARN": "#b58900",
         "ERROR": "#dc322f",
         "DEBUG": "#268bd2",
         "ID": "#6c71c4",
-        "ID_A": "#0080FF",   # MCU_A: 鲜艳蓝
-        "ID_B": "#7c3aed",   # MCU_B: 紫
+        "ID_A": "#222",      # MCU_A: 原非 ID 黑
+        "ID_B": "#0080FF",   # MCU_B: 原 ID_A 蓝
         "ID_C": "#00A86B",   # MCU_C: 翠绿
     }
 
@@ -61,8 +64,10 @@ class SerialAssistant(ttk.PanedWindow):
         self._find_bar_visible = False
         self._defer_scroll = False
         self._text_insert_gen = 0
-        self._mono_font = get_ui_fonts().mono_normal
-        self._recv_font = get_ui_fonts().mono_small
+        fonts = get_ui_fonts()
+        self._mono_font = fonts.mono_normal
+        self._recv_font_size = _RECV_FONT_DEFAULT
+        self._recv_font = (fonts.mono, self._recv_font_size)
         self._send_count = 0
         self._send_bytes = 0
         self._recv_count = 0
@@ -184,8 +189,12 @@ class SerialAssistant(ttk.PanedWindow):
         text_frame.rowconfigure(0, weight=1)
         text_frame.columnconfigure(0, weight=1)
 
-        self.recv_text = tk.Text(text_frame, wrap=tk.WORD,
-                                 font=self._recv_font, bg="#fafafa", fg="#1a1a1a")
+        self.recv_text = tk.Text(
+            text_frame, wrap=tk.WORD,
+            font=self._recv_font, bg="#fafafa", fg="#1a1a1a",
+            # 略深于背景，避免系统蓝选中与蓝色日志叠色
+            selectbackground="#e6e6e6", selectforeground="#1a1a1a",
+        )
         self.recv_text.grid(row=0, column=0, sticky=tk.NSEW)
 
         sb_y = ttk.Scrollbar(text_frame, orient=tk.VERTICAL, command=self.recv_text.yview)
@@ -200,7 +209,7 @@ class SerialAssistant(ttk.PanedWindow):
         self._setup_recv_text_bindings()
 
     def _setup_recv_text_bindings(self):
-        """接收区只读：可选中/复制，禁止编辑。"""
+        """接收区只读：可选中/复制，禁止编辑；Ctrl+滚轮缩放字号。"""
         self.recv_text.bind("<Key>", self._on_recv_key)
         self.recv_text.bind("<<Paste>>", lambda _e: "break")
         self.recv_text.bind("<Control-v>", lambda _e: "break")
@@ -208,11 +217,54 @@ class SerialAssistant(ttk.PanedWindow):
         self.recv_text.bind("<F3>", self._find_next_shortcut)
         self.recv_text.bind("<Shift-F3>", self._find_prev_shortcut)
         self.recv_text.bind("<Button-3>", self._show_recv_context_menu)
+        # Windows 上 Ctrl+滚轮常以 MouseWheel+Control 位投递；两套绑定都接住
+        self.recv_text.bind("<MouseWheel>", self._on_recv_wheel)
+        self.recv_text.bind("<Control-MouseWheel>", self._on_recv_ctrl_wheel)
+        self.recv_text.bind("<Control-Button-4>", self._on_recv_ctrl_wheel)
+        self.recv_text.bind("<Control-Button-5>", self._on_recv_ctrl_wheel)
         self._recv_context_menu = tk.Menu(self.recv_text, tearoff=0)
         self._recv_context_menu.add_command(
             label="复制", command=self._copy_recv_selection, accelerator="Ctrl+C")
         self._recv_context_menu.add_command(
             label="全选", command=self._select_all_recv_text, accelerator="Ctrl+A")
+
+    def _on_recv_wheel(self, event):
+        """普通滚轮交给默认滚动；按住 Ctrl 时改为缩放字号。"""
+        if event.state & 0x4:
+            return self._on_recv_ctrl_wheel(event)
+        return None
+
+    def _on_recv_ctrl_wheel(self, event):
+        """Ctrl + 滚轮：放大/缩小接收区 log 字号。"""
+        delta = getattr(event, "delta", 0)
+        if delta:
+            step = 1 if delta > 0 else -1
+        elif getattr(event, "num", None) == 4:
+            step = 1
+        elif getattr(event, "num", None) == 5:
+            step = -1
+        else:
+            return "break"
+        self._set_recv_font_size(self._recv_font_size + step)
+        return "break"
+
+    def get_recv_font_size(self) -> int:
+        return int(self._recv_font_size)
+
+    def set_recv_font_size(self, size: int):
+        self._set_recv_font_size(size)
+
+    def _set_recv_font_size(self, size: int):
+        size = max(_RECV_FONT_MIN, min(_RECV_FONT_MAX, int(size)))
+        if size == self._recv_font_size:
+            return
+        family = self._recv_font[0]
+        self._recv_font_size = size
+        self._recv_font = (family, size)
+        try:
+            self.recv_text.configure(font=self._recv_font)
+        except tk.TclError:
+            pass
 
     def _on_recv_key(self, event):
         """允许导航、选择、复制/全选/查找；拦截写入。"""
@@ -372,9 +424,9 @@ class SerialAssistant(ttk.PanedWindow):
         self._mode_label.configure(text="列表发送")
 
     def apply_recv_send_split(self, recv_ratio: Optional[float] = None) -> bool:
-        """按固定比例设置收发区分割条（接收区在上、发送区在下）。"""
+        """按比例设置收发区分割条（接收区在上、发送区在下）。"""
         ratio = self.DEFAULT_RECV_RATIO if recv_ratio is None else recv_ratio
-        ratio = max(0.20, min(float(ratio), 0.70))
+        ratio = max(0.20, min(float(ratio), 0.85))
         try:
             self.update_idletasks()
             total = self.winfo_height()
@@ -387,6 +439,16 @@ class SerialAssistant(ttk.PanedWindow):
             return True
         except tk.TclError:
             return False
+
+    def get_recv_send_ratio(self) -> Optional[float]:
+        """当前接收区高度占比；窗口过小时返回 None。"""
+        try:
+            total = self.winfo_height()
+            if total < 160:
+                return None
+            return self.sashpos(0) / float(total)
+        except tk.TclError:
+            return None
 
     def get_action_block_min_height(self) -> int:
         """下方 action 区最小高度（发送框 + 格式行 + 切换栏）。"""
@@ -457,6 +519,8 @@ class SerialAssistant(ttk.PanedWindow):
         wheel_roots = (canvas, list_frame, self._presets_rows_frame)
 
         def _on_presets_wheel(event):
+            if event.state & 0x4:  # Ctrl：留给接收区缩放字号
+                return None
             w = event.widget
             while w is not None:
                 if w in wheel_roots:
@@ -1189,7 +1253,7 @@ class SerialAssistant(ttk.PanedWindow):
         if not data:
             return
         text = self._ts() + self._encode_bytes(data)
-        self._append(text)
+        self._append(text, tag="lv_INFO")
 
     def feed_line(self, line: bytes, add_ts: bool = True):
         if not line:
@@ -1200,7 +1264,7 @@ class SerialAssistant(ttk.PanedWindow):
         except Exception:
             text = line_clean.hex(" ")
         prefix = self._ts() if add_ts else ""
-        self._append(prefix + text)
+        self._append(prefix + text, tag="lv_INFO")
 
     def _post_status(self, level: str, msg: str):
         if self._on_status is not None:
