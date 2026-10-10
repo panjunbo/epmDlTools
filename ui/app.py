@@ -7,7 +7,7 @@ import time
 import tkinter as tk
 from collections import deque
 from tkinter import ttk, messagebox, filedialog
-from typing import TYPE_CHECKING, Deque, List, Optional
+from typing import TYPE_CHECKING, Deque, List, Optional, Tuple
 
 from utils.app_paths import get_logs_dir, get_readback_dir
 from utils.config_manager import ConfigManager
@@ -39,6 +39,77 @@ _REPLAY_CHUNK_BATCH = 150
 # 实时串口：合并 after 回调，每 tick 最多处理 N 块 raw 数据
 _LIVE_LOG_BATCH = 64
 _LIVE_LOG_DRAIN_MS = 16
+
+# (原始字节, 主机时间戳)。时间为 None 表示整段来自加载的文件，刷新时不另加时间戳。
+LogSeg = Tuple[bytes, Optional[str]]
+
+
+def replay_host_ts(stored: Optional[str], show_ts: bool) -> Optional[str]:
+    """刷新时要用的主机时间戳。
+
+    None：这段没有记录过接收时间（加载的 log），调用方不要再加前缀。
+    字符串：实时接收时记下的前缀；取消勾选“时间戳”时返回空串。
+    """
+    if stored is None:
+        return None
+    return stored if show_ts else ""
+
+
+def trim_log_segments(
+    segs: List[LogSeg], length: int, max_bytes: int,
+) -> Tuple[List[LogSeg], int, bool]:
+    """丢掉缓存前部，使总长度不超过 max_bytes。切点对齐到换行，并保留尾部时间戳。"""
+    overflow = length - max_bytes
+    if overflow <= 0:
+        return segs, length, False
+    cut = _log_trim_cut(segs, length, overflow)
+    new_segs, new_len = _drop_log_prefix(segs, length, cut)
+    return new_segs, new_len, True
+
+
+def _log_trim_cut(segs: List[LogSeg], length: int, overflow: int) -> int:
+    if overflow >= length:
+        return length
+    pos = 0
+    for i, (data, _ts) in enumerate(segs):
+        end = pos + len(data)
+        if end <= overflow:
+            pos = end
+            continue
+        nl = data.find(b"\n", overflow - pos)
+        if nl >= 0:
+            return pos + nl + 1
+        pos = end
+        for data2, _ts2 in segs[i + 1:]:
+            nl = data2.find(b"\n")
+            if nl >= 0:
+                return pos + nl + 1
+            pos += len(data2)
+        return overflow
+    return overflow
+
+
+def _drop_log_prefix(
+    segs: List[LogSeg], length: int, cut: int,
+) -> Tuple[List[LogSeg], int]:
+    if cut <= 0:
+        return list(segs), length
+    if cut >= length:
+        return [], 0
+    pos = 0
+    for i, (data, ts) in enumerate(segs):
+        end = pos + len(data)
+        if end <= cut:
+            pos = end
+            continue
+        rel = cut - pos
+        out: List[LogSeg] = []
+        tail = data[rel:]
+        if tail:
+            out.append((tail, ts))
+        out.extend(segs[i + 1:])
+        return out, length - cut
+    return [], 0
 
 # 每芯片下载规格 — 对应 download_tools_9062.bat / download_tools_9032.bat 的命令序列
 # mode:        programmer | flashload
@@ -201,8 +272,10 @@ class EpmDlApp(tk.Tk):
             on_reload_bin_selection=self._load_bin_selection,
         )
 
-        # 串口/加载 log 的原始字节缓存，供刷新 idlog bin 后重解析
-        self._recv_log_raw = bytearray()
+        # 串口/加载 log 的原始字节缓存，供刷新 idlog bin 后重解析。
+        # 实时接收的每一块都带主机时间戳，刷新时按原时间重放。
+        self._recv_log_segs: List[LogSeg] = []
+        self._recv_log_len = 0
         self._recv_log_trim_warned = False
         self._replay_state = None
         # 实时串口 log 待处理队列（rx 线程只入队，主线程批量 drain）
@@ -221,6 +294,7 @@ class EpmDlApp(tk.Tk):
         self.assistant.bind_flush_timeout_callback(
             lambda ms: self._apply_flush_timeout(ms)
         )
+        self.assistant.bind_show_mode_callback(self._reparse_recv_log)
         # ID_LOG 帧解析器：识别 0xA58E 同步帧，把 [MCU_X] 标记打到 SerialAssistant
         self._id_log_parser = IdLogParser()
 
@@ -834,28 +908,24 @@ class EpmDlApp(tk.Tk):
         self._cancel_live_log_drain()
         self._live_log_queue.clear()
         self._set_log_load_busy(False)
-        self._recv_log_raw.clear()
+        self._recv_log_segs = []
+        self._recv_log_len = 0
         self._recv_log_trim_warned = False
 
-    def _append_recv_log_raw(self, data: bytes):
+    def _append_recv_log_raw(self, data: bytes, ts: Optional[str]):
         if not data:
             return
-        self._recv_log_raw.extend(data)
+        self._recv_log_segs.append((data, ts))
+        self._recv_log_len += len(data)
         self._trim_recv_log_raw()
 
     def _trim_recv_log_raw(self, *, warn: bool = True):
-        overflow = len(self._recv_log_raw) - RECV_LOG_RAW_MAX
-        if overflow <= 0:
+        new_segs, new_len, trimmed = trim_log_segments(
+            self._recv_log_segs, self._recv_log_len, RECV_LOG_RAW_MAX)
+        if not trimmed:
             return
-        cut = overflow
-        buf = self._recv_log_raw
-        if cut < len(buf):
-            nl = buf.find(b"\n", cut)
-            if nl >= 0:
-                cut = nl + 1
-            del buf[:cut]
-        else:
-            buf.clear()
+        self._recv_log_segs = new_segs
+        self._recv_log_len = new_len
         if warn and not self._recv_log_trim_warned:
             self._recv_log_trim_warned = True
             mb = RECV_LOG_RAW_MAX // (1024 * 1024)
@@ -881,7 +951,8 @@ class EpmDlApp(tk.Tk):
         self._cancel_log_replay()
         with open(path, "rb") as fp:
             data = fp.read()
-        self._recv_log_raw = bytearray(data)
+        self._recv_log_segs = [(data, None)] if data else []
+        self._recv_log_len = len(data)
         self._trim_recv_log_raw()
         self._set_log_load_busy(True)
 
@@ -892,11 +963,16 @@ class EpmDlApp(tk.Tk):
         self._replay_log_bytes(data, on_done=_done)
 
     def _reparse_recv_log(self):
-        """用当前 idlog bin 重新解析接收区缓存的串口/log 原始数据。"""
-        if not self._recv_log_raw:
+        """用当前 idlog bin 重新解析接收区缓存，并保留实时接收时的主机时间戳。"""
+        if self._recv_log_len <= 0 or not self._recv_log_segs:
             return
         self._cancel_log_replay()
-        self._replay_log_bytes(bytes(self._recv_log_raw))
+        segs = list(self._recv_log_segs)
+        # 加载的文件是一整段、没有接收时间。文本里的时间戳已经在内容里。
+        if len(segs) == 1 and segs[0][1] is None:
+            self._replay_log_bytes(segs[0][0])
+            return
+        self._replay_log_segments(segs)
 
     def _replay_log_bytes(self, data: bytes, on_done=None):
         """重放原始 log 字节流（不写入缓存、不清空缓存）。"""
@@ -906,23 +982,52 @@ class EpmDlApp(tk.Tk):
             if on_done:
                 on_done()
             return
-        if b"\x8e\xa5" not in data:
+        if b"\x8e\xa5" not in data and self.assistant.show_mode.get() != "HEX":
             self.assistant.load_log_bytes(data, clear_buffer=False, on_done=on_done)
             return
         chunks = self._split_log_chunks(data)
-        if len(data) < LARGE_LOG_BYTES:
+        self._begin_log_replay(chunks, None, len(data), on_done, already_cleared=True)
+
+    def _replay_log_segments(self, segs: List[LogSeg], on_done=None):
+        """按实时接收时的分块重放，套用当时记下的主机时间戳。"""
+        show = self.assistant.show_ts.get()
+        chunks: List[bytes] = []
+        prefixes: List[str] = []
+        total = 0
+        for raw, ts in segs:
+            if not raw:
+                continue
+            shown = replay_host_ts(ts, show)
+            chunks.append(raw)
+            prefixes.append("" if shown is None else shown)
+            total += len(raw)
+        self._begin_log_replay(chunks, prefixes, total, on_done)
+
+    def _begin_log_replay(self, chunks: List[bytes], ts_prefixes: Optional[List[str]],
+                          total_len: int, on_done=None, already_cleared: bool = False):
+        if not already_cleared:
+            self.assistant.clear_recv(clear_buffer=False)
+            self.assistant._end_find_session()
+        if not chunks:
+            if on_done:
+                on_done()
+            return
+        if total_len < LARGE_LOG_BYTES:
             parser = IdLogParser()
             id_maps = self._build_id_log_maps()
             ini_map = self.cm.list_id_log_map()
-            for chunk in chunks:
+            for i, chunk in enumerate(chunks):
+                prefix = None if ts_prefixes is None else ts_prefixes[i]
                 self._emit_log_chunk(
-                    chunk, parser, id_maps, ini_map, record=False, add_ts=False)
+                    chunk, parser, id_maps, ini_map,
+                    record=False, add_ts=False, ts_prefix=prefix, save=False)
             self.assistant.flush_pending()
             if on_done:
                 on_done()
             return
         self._replay_state = {
             "chunks": chunks,
+            "ts_prefixes": ts_prefixes,
             "index": 0,
             "parser": IdLogParser(),
             "id_maps": self._build_id_log_maps(),
@@ -938,10 +1043,12 @@ class EpmDlApp(tk.Tk):
         if not st:
             return
         end = min(st["index"] + st["batch"], len(st["chunks"]))
+        prefixes = st.get("ts_prefixes")
         for i in range(st["index"], end):
+            prefix = None if prefixes is None else prefixes[i]
             self._emit_log_chunk(
                 st["chunks"][i], st["parser"], st["id_maps"], st["ini_map"],
-                record=False, add_ts=False)
+                record=False, add_ts=False, ts_prefix=prefix, save=False)
         st["index"] = end
         self.assistant.flush_pending()
         if st["index"] < len(st["chunks"]):
@@ -959,18 +1066,30 @@ class EpmDlApp(tk.Tk):
             cb()
 
     def _emit_log_chunk(self, raw: bytes, parser=None, id_maps=None, ini_map=None,
-                        record: bool = True, add_ts: bool = True):
-        """解析 ID_LOG 帧并写入接收区（与实时串口显示逻辑一致）。"""
+                        record: bool = True, add_ts: bool = True,
+                        ts_prefix: Optional[str] = None, save: bool = True):
+        """解析 ID_LOG 帧并写入接收区（与实时串口显示逻辑一致）。
+
+        实时接收时记下主机时间戳。刷新重放传入 ts_prefix，避免时间被刷成空。
+        """
         if not raw:
             return
         if record:
-            self._append_recv_log_raw(raw)
+            captured = self.assistant.format_host_ts()
+            self._append_recv_log_raw(raw, captured)
             self.assistant.note_recv_bytes(len(raw))
+            ts_prefix = captured if self.assistant.show_ts.get() else ""
+            add_ts = False
         if parser is None:
             parser = self._id_log_parser
         entries, remaining = parser.feed(raw)
+        if self.assistant.show_mode.get() == "HEX":
+            self.assistant.feed_line(
+                raw, add_ts=add_ts, ts_prefix=ts_prefix, save=save)
+            return
         if remaining and remaining.strip(b"\r\n"):
-            self.assistant.feed_line(remaining, add_ts=add_ts)
+            self.assistant.feed_line(
+                remaining, add_ts=add_ts, ts_prefix=ts_prefix, save=save)
         if entries:
             if id_maps is None:
                 id_maps = self._build_id_log_maps()
@@ -980,7 +1099,8 @@ class EpmDlApp(tk.Tk):
                 level = self._cpu_to_id_level(e.cpu_id)
                 self.assistant.feed_log(
                     level, self._format_id_log(e, id_maps, ini_map), add_ts=add_ts,
-                    head=format_id_log_head(level, e.timestamp))
+                    head=format_id_log_head(level, e.timestamp),
+                    ts_prefix=ts_prefix, save=save)
 
     def _idlog_bin_dir(self) -> str:
         dp = getattr(self, "dl_panel", None)

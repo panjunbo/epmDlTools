@@ -105,6 +105,7 @@ class SerialAssistant(ttk.PanedWindow):
         ttk.Combobox(toolbar1, textvariable=self.show_mode,
                      values=["ASCII", "HEX"], width=6, state="readonly").pack(
             side=tk.LEFT, padx=(0, 6))
+        self.show_mode.trace_add("write", self._on_show_mode_changed)
 
         ttk.Separator(toolbar1, orient=tk.VERTICAL).pack(
             side=tk.LEFT, fill=tk.Y, padx=4, pady=2)
@@ -916,6 +917,19 @@ class SerialAssistant(ttk.PanedWindow):
         """注册回调：UI 里的 ms 值变化时（Spinbox 修改 / set_flush_timeout_ms）会被调用。"""
         self._flush_timeout_callback = cb
 
+    def _on_show_mode_changed(self, *_args):
+        cb = getattr(self, "_show_mode_callback", None)
+        if cb is None:
+            return
+        try:
+            cb()
+        except Exception:
+            pass
+
+    def bind_show_mode_callback(self, cb: Optional[Callable[[], None]]):
+        """显示模式 ASCII/HEX 变化时重画接收区。"""
+        self._show_mode_callback = cb
+
     # ---------- 文件保存 ----------
 
     def _on_load_log_clicked(self):
@@ -1244,10 +1258,20 @@ class SerialAssistant(ttk.PanedWindow):
         except Exception:
             return data.hex(" ")
 
+    def format_host_ts(self) -> str:
+        """主机接收时间，形如 [HH:MM:SS.mmm] 。不受“时间戳”勾选影响。"""
+        now = datetime.now()
+        return now.strftime("[%H:%M:%S.") + f"{now.microsecond // 1000:03d}] "
+
     def _ts(self) -> str:
         if not self.show_ts.get():
             return ""
-        return datetime.now().strftime("[%H:%M:%S.") + f"{datetime.now().microsecond // 1000:03d}] "
+        return self.format_host_ts()
+
+    def _line_prefix(self, add_ts: bool = True, ts_prefix: Optional[str] = None) -> str:
+        if ts_prefix is not None:
+            return ts_prefix
+        return self._ts() if add_ts else ""
 
     def feed_recv(self, data: bytes):
         if not data:
@@ -1255,29 +1279,35 @@ class SerialAssistant(ttk.PanedWindow):
         text = self._ts() + self._encode_bytes(data)
         self._append(text, tag="lv_INFO")
 
-    def feed_line(self, line: bytes, add_ts: bool = True):
+    def feed_line(self, line: bytes, add_ts: bool = True,
+                  ts_prefix: Optional[str] = None, save: bool = True):
         if not line:
             return
-        line_clean = line.rstrip(b"\r\n")
-        try:
-            text = line_clean.decode(self.encoding, errors="replace")
-        except Exception:
-            text = line_clean.hex(" ")
-        prefix = self._ts() if add_ts else ""
-        self._append(prefix + text, tag="lv_INFO")
+        if self.show_mode.get() == "HEX":
+            # 保留 0D/0A，十六进制要能看到换行字节
+            text = self._encode_bytes(line)
+        else:
+            line_clean = line.rstrip(b"\r\n")
+            try:
+                text = line_clean.decode(self.encoding, errors="replace")
+            except Exception:
+                text = line_clean.hex(" ")
+        prefix = self._line_prefix(add_ts, ts_prefix)
+        self._append(prefix + text, tag="lv_INFO", save=save)
 
     def _post_status(self, level: str, msg: str):
         if self._on_status is not None:
             self._on_status(level, msg)
 
     def feed_log(self, level: str, msg: str, add_ts: bool = True,
-                 head: Optional[str] = None):
-        prefix = self._ts() if add_ts else ""
+                 head: Optional[str] = None, ts_prefix: Optional[str] = None,
+                 save: bool = True):
+        prefix = self._line_prefix(add_ts, ts_prefix)
         label = head if head else f"[{level}]"
-        self._append(prefix + f"{label} {msg}", tag=f"lv_{level}")
+        self._append(prefix + f"{label} {msg}", tag=f"lv_{level}", save=save)
 
-    def _append(self, line: str, tag: str = ""):
-        self._append_pending.append((line, tag))
+    def _append(self, line: str, tag: str = "", save: bool = True):
+        self._append_pending.append((line, tag, save))
         if len(self._append_pending) >= _APPEND_BATCH:
             self.flush_pending()
 
@@ -1289,14 +1319,15 @@ class SerialAssistant(ttk.PanedWindow):
         self._append_pending = []
         save_lines: List[str] = []
         try:
-            for line, tag in pending:
+            for line, tag, save in pending:
                 if not line.endswith("\n"):
                     line = line + "\n"
                 if tag:
                     self.recv_text.insert(tk.END, line, tag)
                 else:
                     self.recv_text.insert(tk.END, line)
-                save_lines.append(line)
+                if save:
+                    save_lines.append(line)
             self._trim_recv_text()
             if (self.auto_scroll.get() and not self._find_active
                     and not self._defer_scroll):
