@@ -2,6 +2,7 @@ import os
 import subprocess
 import platform
 import tkinter as tk
+import tkinter.font as tkfont
 from tkinter import ttk
 from typing import Callable, List, Optional
 
@@ -41,8 +42,6 @@ class EraseReadPanel(ttk.LabelFrame):
         self.use_xip = tk.BooleanVar(value=False)
         self._read_click_job = None
 
-        self.columnconfigure(0, weight=0, minsize=56)
-
         self._entries: List[ttk.Entry] = []
         rows = [
             ("擦除地址", self.erase_addr),
@@ -50,9 +49,15 @@ class EraseReadPanel(ttk.LabelFrame):
             ("回读地址", self.read_addr),
             ("回读大小", self.read_size),
         ]
+        # 不设 width：四个汉字比 width=7 个西文更宽，会被裁成「除地址」
+        label_font = tkfont.Font(root=self, font=get_ui_fonts().ui_normal)
+        self.columnconfigure(
+            0, weight=0,
+            minsize=max(label_font.measure(text) for text, _var in rows) + 6,
+        )
         field_font = get_ui_fonts().ui_small
         for i, (text, var) in enumerate(rows):
-            ttk.Label(self, text=text, width=7, anchor=tk.E).grid(
+            ttk.Label(self, text=text, anchor=tk.E).grid(
                 row=i, column=0, sticky=tk.E, padx=(2, 4), pady=4)
             entry = ttk.Entry(self, textvariable=var, width=12, font=field_font)
             entry.grid(row=i, column=1, sticky=tk.W, padx=(0, 8), pady=4)

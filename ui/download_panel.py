@@ -6,7 +6,7 @@ from typing import Callable, Dict, List, Optional
 
 from utils.app_paths import dialog_initial_dir
 
-from .theme import get_ui_fonts
+from .theme import get_ui_fonts, scale_px
 
 _STATUS_MAX_LINES = 400
 
@@ -123,11 +123,13 @@ class DownloadPanel(ttk.LabelFrame):
         # 有 id_log 的 key（programmer/bootloader 没有，chip_bin_files 中为 None）
         self._ID_LOG_KEYS = tuple(k for k in self.BINARY_KEYS if k.startswith("mcu_"))
 
-        # 全表 grid：复选框列 + 固定宽 key 列 + 文件名列，各行文件名左缘对齐
-        self._bins_top.columnconfigure(0, minsize=self._LEAD_COL_MINSIZE)
+        # 全表 grid：复选框列 + 固定宽 key 列 + 文件名列，各行文件名左缘对齐。
+        # 文件名列 weight=1，不按全文要宽度，否则 150% 下会把右侧整栏撑破。
+        lead = scale_px(self, self._LEAD_COL_MINSIZE)
+        self._bins_top.columnconfigure(0, minsize=lead)
         self._bins_top.columnconfigure(1, minsize=0)
         self._bins_top.columnconfigure(2, weight=1)
-        self._bins_bot.columnconfigure(0, minsize=self._LEAD_COL_MINSIZE)
+        self._bins_bot.columnconfigure(0, minsize=lead)
         self._bins_bot.columnconfigure(1, minsize=0)
         self._bins_bot.columnconfigure(2, weight=1)
 
@@ -145,7 +147,7 @@ class DownloadPanel(ttk.LabelFrame):
             ).grid(row=i, column=1, padx=(0, 4), sticky=tk.W)
             self._file_labels[key] = ttk.Label(
                 self._bins_top, text="(未配置)", foreground="#888",
-                anchor=tk.W, font=file_font,
+                anchor=tk.W, font=file_font, width=8,
             )
             self._file_labels[key].grid(row=i, column=2, sticky=tk.EW, padx=2)
             self._status_labels[key] = ttk.Label(self._bins_top, text="", width=9)
@@ -174,7 +176,7 @@ class DownloadPanel(ttk.LabelFrame):
             ).grid(row=i, column=1, padx=(0, 4), sticky=tk.W)
             self._id_log_labels[key] = ttk.Label(
                 self._bins_bot, text="(无)", foreground="#888",
-                anchor=tk.W, font=file_font,
+                anchor=tk.W, font=file_font, width=8,
             )
             self._id_log_labels[key].grid(row=i, column=2, sticky=tk.EW, padx=2)
             self._id_log_status[key] = ttk.Label(self._bins_bot, text="", width=9)

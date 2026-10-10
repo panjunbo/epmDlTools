@@ -26,7 +26,7 @@ from .download_panel import DownloadPanel
 from .erase_read_panel import EraseReadPanel
 from .serial_assistant import SerialAssistant
 from .serial_panel import SerialPanel, SerialParamDialog
-from .theme import init_ui_theme
+from .theme import init_ui_theme, normalize_tk_scaling, scale_px
 
 if TYPE_CHECKING:
     from commands.base import SerialManager
@@ -128,6 +128,26 @@ def _open_with_dialog(path: str, owner: int = 0) -> None:
     raise OSError(None, f"打开方式失败 (0x{hr & 0xFFFFFFFF:08X})", path)
 
 
+def initial_h_sash(total: int, right_need: int, left_need: int) -> int:
+    """左日志 / 右配置 的初始分隔位置（像素）。
+
+    默认左侧 60%。150% 缩放时右侧控件比 40% 更宽，就把分隔条左移；
+    两边都放不下时优先保住左侧工具栏，避免按钮被裁掉。
+    """
+    if total <= 200:
+        return max(0, total // 2)
+    right_need = max(0, right_need)
+    left_need = max(0, left_need)
+    pos = int(total * 0.6)
+    if left_need + right_need <= total:
+        if total - pos < right_need:
+            pos = total - right_need
+        if pos < left_need:
+            pos = left_need
+        return pos
+    return max(0, min(left_need, total - 80))
+
+
 class EpmDlApp(tk.Tk):
     # 窗口尺寸限制：保证 UI 控件在不同显示器上都不会被截断
     MIN_WIDTH = 1000
@@ -135,6 +155,8 @@ class EpmDlApp(tk.Tk):
 
     def __init__(self, cfg: dict, cm: ConfigManager, logger: Logger):
         super().__init__()
+        # 固定 100% 排版，再创建字体和控件。系统 150% 时布局仍与 100% 相同。
+        normalize_tk_scaling(self)
         self._startup_layout_done = False
         init_ui_theme(self)
         self.title(f"EPM Download Tool  v{__version__}")
@@ -142,7 +164,7 @@ class EpmDlApp(tk.Tk):
         self._base_logger = logger
 
         # 先设置 minsize，启动后默认最大化（不读 config 里保存的尺寸）
-        self.minsize(self.MIN_WIDTH, self.MIN_HEIGHT)
+        self._apply_scaled_minsize()
 
         # 顶层 hpaned：左 = 接收区+ID Log，右 = 配置区
         self.hpaned = ttk.PanedWindow(self, orient=tk.HORIZONTAL)
@@ -252,6 +274,17 @@ class EpmDlApp(tk.Tk):
         self.serial_panel.refresh_ports()
         self.dl_panel.enable_refresh()
         self.dl_panel.refresh_bins()
+        # bin 文件名填上之后右侧需要的宽度才稳定，再摆一次分隔条
+        self._set_hpaned_initial_position()
+
+    def _apply_scaled_minsize(self):
+        """最小窗口随系统缩放变大，但不超过当前屏幕。"""
+        sw = max(1, self.winfo_screenwidth())
+        sh = max(1, self.winfo_screenheight())
+        self.minsize(
+            min(scale_px(self, self.MIN_WIDTH), max(800, sw - 40)),
+            min(scale_px(self, self.MIN_HEIGHT), max(480, sh - 80)),
+        )
 
     def _build_menu(self):
         menubar = tk.Menu(self)
@@ -294,9 +327,10 @@ class EpmDlApp(tk.Tk):
         self.assistant.grid(in_=left, row=0, column=0,
                               sticky=tk.NSEW, padx=4, pady=2)
 
-        # 右半配置区：上半 serial+erase_read 横排（高度一致），下半 dl_panel 撑满剩余空间
-        right.columnconfigure(0, weight=1, uniform="cfg_row")
-        right.columnconfigure(1, weight=1, uniform="cfg_row")
+        # 右半配置区：上半 serial+erase_read 横排（高度一致），下半 dl_panel 撑满剩余空间。
+        # 不用 uniform：150% 时串口栏比擦除栏宽，等宽会把端口框挤短。
+        right.columnconfigure(0, weight=1)
+        right.columnconfigure(1, weight=1)
         right.rowconfigure(0, weight=0)   # 上半按内容最高决定
         right.rowconfigure(1, weight=1)   # 下半（下载区）撑开
 
@@ -316,9 +350,14 @@ class EpmDlApp(tk.Tk):
         try:
             self.update_idletasks()
             total = self.hpaned.winfo_width()
+            right_need = self._right_frame.winfo_reqwidth() + scale_px(self, 8)
+            left_need = scale_px(self, 200)
+            try:
+                left_need = self.assistant._toolbar1.winfo_reqwidth() + scale_px(self, 8)
+            except Exception:
+                pass
+            pos = initial_h_sash(total, right_need, left_need)
             if total > 200:
-                # 左半约占 60%，下限保护（左 ≥ 400，右 ≥ 360）
-                pos = max(400, min(int(total * 0.6), total - 360))
                 self.hpaned.sashpos(0, pos)
         except Exception:
             pass

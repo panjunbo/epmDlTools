@@ -8,24 +8,31 @@ from utils.logger import make_default_logger
 
 
 def _enable_dpi_awareness():
-    """Windows 高分屏支持：让 tkinter 按系统 DPI 缩放，避免界面在 4K/2K 屏上显示不全。
-    在 Tk() 创建之前调用。
+    """窗口使用显示器真实像素，避免 150% 时被系统整窗拉伸变糊、逻辑分辨率变小。
+
+    界面字号仍固定在 100%（见 ui.theme.normalize_tk_scaling）。这里只用
+    Per-Monitor V2，让系统主题和 Tk 画在同一套像素上。
+    ``SetProcessDpiAwareness(2)`` 是旧的 V1，150% 时主题和字体会错位。
     """
     if sys.platform != "win32":
         return
     try:
-        # Win10 1607+：Per-Monitor V2（推荐）
-        ctypes.windll.shcore.SetProcessDpiAwareness(2)
+        user32 = ctypes.windll.user32
+        user32.SetProcessDpiAwarenessContext.restype = ctypes.c_bool
+        user32.SetProcessDpiAwarenessContext.argtypes = [ctypes.c_void_p]
+        # DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = (HANDLE)-4
+        if user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4)):
+            return
+    except Exception:
+        pass
+    try:
+        # Win8.1：系统 DPI 感知（主题和字体至少按同一个 DPI）
+        ctypes.windll.shcore.SetProcessDpiAwareness(1)
     except Exception:
         try:
-            # Win8.1：system DPI aware
-            ctypes.windll.shcore.SetProcessDpiAwareness(1)
+            ctypes.windll.user32.SetProcessDPIAware()
         except Exception:
-            try:
-                # 旧版 Win
-                ctypes.windll.user32.SetProcessDPIAware()
-            except Exception:
-                pass
+            pass
 
 
 # CLI 顶层解析器：与 download_tools_9062.bat 的调用约定对齐（flat args）。

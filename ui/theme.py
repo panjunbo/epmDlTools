@@ -8,6 +8,9 @@ from dataclasses import dataclass
 from tkinter import ttk
 from typing import Optional, Tuple
 
+# 96 DPI 下 Tk 的默认 scaling（96/72）
+_BASE_SCALING = 96.0 / 72.0
+
 # UI：系统无衬线；等宽：日志 / 文件名
 UI_FONT_CANDIDATES = (
     "Segoe UI",
@@ -70,6 +73,44 @@ def _pick_family(candidates: tuple[str, ...], root: tk.Misc) -> str:
         return tkfont.nametofont("TkDefaultFont").actual("family")
     except tk.TclError:
         return candidates[-1] if candidates else "TkDefaultFont"
+
+
+def ui_scale(widget: tk.Misc) -> float:
+    """相对 100%（96 DPI）的界面缩放，与 Tk 的 ``scalingPct`` 对齐。
+
+    100% → 1.0，150% → 1.5。像素写死的间距、最小宽度用这个系数放大，
+    才会和已经随 DPI 变大的字体保持同样的比例。
+    """
+    try:
+        pct = float(widget.tk.call("set", "::tk::scalingPct"))
+        if pct >= 100:
+            return pct / 100.0
+    except (tk.TclError, TypeError, ValueError):
+        pass
+    try:
+        scaling = float(widget.tk.call("tk", "scaling"))
+        if scaling > 0:
+            return max(1.0, scaling / _BASE_SCALING)
+    except (tk.TclError, TypeError, ValueError):
+        pass
+    return 1.0
+
+
+def scale_px(widget: tk.Misc, pixels: int) -> int:
+    """把按 100% 设计的像素值换成当前缩放下的像素。"""
+    return max(1, int(round(pixels * ui_scale(widget))))
+
+
+def normalize_tk_scaling(root: tk.Tk) -> None:
+    """界面固定按 100%（96 DPI）排版，不跟随系统显示缩放。
+
+    系统是 150% 时若让 Tk 用 DPI/72，字号和控件会放大约 1.5 倍，
+    和 100% 不是同一套布局。钉在 96/72 后，两种缩放下的字号、间距相同。
+    """
+    try:
+        root.tk.call("tk", "scaling", _BASE_SCALING)
+    except tk.TclError:
+        pass
 
 
 def get_ui_fonts() -> UiFonts:
