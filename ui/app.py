@@ -524,6 +524,7 @@ class EpmDlApp(tk.Tk):
         # 回读模式（双击"回读"按钮切换）初始值取配置，切换后随保存写回
         self.erase_read_panel.set_xip(
             self._cfg_bool(self.cm.get("flashload", "xip_read", "false")))
+        self._apply_erase_read_fields()
 
         saved = self.cm.list_presets()
         self.assistant.set_presets(saved if saved else self.assistant._default_presets())
@@ -572,6 +573,7 @@ class EpmDlApp(tk.Tk):
         self.cm.set("flashload", "comm_type", sp.comm_type.get())
         self.cm.set("flashload", "xip_read",
                     "true" if self.erase_read_panel.use_xip.get() else "false")
+        self._store_erase_read_fields()
         self.cm.set("flashload", "reset_after_download",
                     "true" if self.dl_panel.do_reset.get() else "false")
         self.cm.set("flashload", "reset_rdelay", self.dl_panel.rdelay.get())
@@ -609,6 +611,27 @@ class EpmDlApp(tk.Tk):
         recv_ratio = self.assistant.get_recv_send_ratio()
         if recv_ratio is not None:
             self.cm.set("ui", "recv_send_sash_ratio", f"{recv_ratio:.4f}")
+
+    def _apply_erase_read_fields(self):
+        """擦除/回读地址和大小从 [flashload] 恢复。缺项时保留界面默认值。"""
+        erp = self.erase_read_panel
+        fields = (
+            ("erase_addr", erp.erase_addr),
+            ("erase_size", erp.erase_size),
+            ("flash_read_addr", erp.read_addr),
+            ("flash_read_size", erp.read_size),
+        )
+        for key, var in fields:
+            saved = self.cm.get("flashload", key, "")
+            if str(saved).strip():
+                var.set(str(saved).strip())
+
+    def _store_erase_read_fields(self):
+        erp = self.erase_read_panel
+        self.cm.set("flashload", "erase_addr", erp.erase_addr.get().strip())
+        self.cm.set("flashload", "erase_size", erp.erase_size.get().strip())
+        self.cm.set("flashload", "flash_read_addr", erp.read_addr.get().strip())
+        self.cm.set("flashload", "flash_read_size", erp.read_size.get().strip())
 
     def _load_bin_selection(self):
         """从 ini 读出勾选意图。界面是否勾上由 refresh 再看文件是否存在。"""
