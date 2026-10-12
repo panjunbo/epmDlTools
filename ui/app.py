@@ -9,7 +9,7 @@ from collections import deque
 from tkinter import ttk, messagebox, filedialog
 from typing import TYPE_CHECKING, Deque, List, Optional, Tuple
 
-from utils.app_paths import get_logs_dir, get_readback_dir
+from utils.app_paths import app_icon_path, get_logs_dir, get_readback_dir
 from utils.config_manager import ConfigManager
 from utils.version import __build_time__, __version__
 from utils.epm_id_log_parser import IdLogParser
@@ -231,6 +231,12 @@ class EpmDlApp(tk.Tk):
         self._startup_layout_done = False
         init_ui_theme(self)
         self.title(f"EPM Download Tool  v{__version__}")
+        icon = app_icon_path()
+        if icon:
+            try:
+                self.iconbitmap(default=icon)
+            except Exception:
+                pass
         self.cm = cm
         self._base_logger = logger
 

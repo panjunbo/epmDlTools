@@ -13,7 +13,10 @@
 block_cipher = None
 
 # 资源文件：打包 example 模板（首次 GUI 启动复制到 dlTools_cfg/config/）
-datas = [('config/config.example.ini', 'config')]
+datas = [
+    ('config/config.example.ini', 'config'),
+    ('assets/download_tools.ico', 'assets'),
+]
 
 # 显式列出 hiddenimports，避免 PyInstaller 漏抓
 # - tkinter: --ui 需要；Python 3.13+ 默认不再隐式包含
@@ -63,6 +66,7 @@ exe = EXE(
     a.datas,
     [],
     name='download_tools',
+    icon='assets/download_tools.ico',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

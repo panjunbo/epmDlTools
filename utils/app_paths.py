@@ -22,6 +22,18 @@ def get_exe_dir() -> str:
     return os.path.dirname(os.path.abspath(sys.argv[0]))
 
 
+def app_icon_path() -> str | None:
+    """窗口图标。开发时用仓库 assets，打包后用解压目录里的同一文件。"""
+    path = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "assets",
+        "download_tools.ico",
+    )
+    if os.path.isfile(path):
+        return path
+    return None
+
+
 def is_frozen_exe() -> bool:
     return getattr(sys, "frozen", False)
 
