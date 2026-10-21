@@ -592,6 +592,7 @@ class SerialAssistant(ttk.PanedWindow):
 
         canvas.bind_all("<MouseWheel>", _on_presets_wheel)
 
+        self._preset_row_menu = tk.Menu(canvas, tearoff=0)
         self._row_frames: List[ttk.Frame] = []
         self._row_vars: List[dict] = []
 
@@ -638,8 +639,93 @@ class SerialAssistant(ttk.PanedWindow):
         ).grid(row=0, column=4, padx=2)
 
         row.columnconfigure(2, weight=1)
+        self._bind_preset_row_context(row, idx)
         self._row_frames.append(row)
         self._row_vars.append(var)
+
+    def _bind_preset_row_context(self, widget, idx: int):
+        """整行（含输入框、下拉框、按钮）右击都弹出插入菜单。"""
+        widget.bind("<Button-3>", lambda e, i=idx: self._show_preset_row_menu(e, i))
+        for child in widget.winfo_children():
+            self._bind_preset_row_context(child, idx)
+
+    def _show_preset_row_menu(self, event, idx: int):
+        menu = self._preset_row_menu
+        menu.delete(0, "end")
+        menu.add_command(
+            label="在上面添加一行",
+            command=lambda i=idx: self._insert_preset_row(i, below=False),
+        )
+        menu.add_command(
+            label="在下面添加一行",
+            command=lambda i=idx: self._insert_preset_row(i, below=True),
+        )
+        target = event.widget
+        if target.winfo_class() in ("TEntry", "Entry"):
+            menu.add_separator()
+            menu.add_command(label="剪切", command=lambda w=target: w.event_generate("<<Cut>>"))
+            menu.add_command(label="复制", command=lambda w=target: w.event_generate("<<Copy>>"))
+            menu.add_command(label="粘贴", command=lambda w=target: w.event_generate("<<Paste>>"))
+            menu.add_command(label="全选", command=lambda w=target: w.selection_range(0, "end"))
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+        return "break"
+
+    def _sync_presets_from_rows(self):
+        """行内正在编辑的内容写回数据，避免重建时丢掉未保存的修改。"""
+        rows = getattr(self, "_row_vars", None)
+        if not rows:
+            return
+        self._presets_data = [
+            {
+                "name": var["name"].get(),
+                "mode": var["mode"].get() or "ASCII",
+                "data": var["data"].get(),
+            }
+            for var in rows
+        ]
+
+    def _insert_preset_row(self, idx: int, below: bool):
+        self._sync_presets_from_rows()
+        if not self._presets_data:
+            return
+        idx = max(0, min(int(idx), len(self._presets_data) - 1))
+        mode = self._presets_data[idx].get("mode") or "ASCII"
+        insert_at = idx + 1 if below else idx
+        self._presets_data.insert(insert_at, {"name": "", "mode": mode, "data": ""})
+        self._rebuild_preset_rows()
+        self._focus_preset_row(insert_at)
+
+    def _focus_preset_row(self, idx: int):
+        if not (0 <= idx < len(self._row_frames)):
+            return
+        self._scroll_preset_row_into_view(idx)
+        for child in self._row_frames[idx].winfo_children():
+            if child.winfo_class() in ("TEntry", "Entry"):
+                child.focus_set()
+                child.icursor("end")
+                break
+
+    def _scroll_preset_row_into_view(self, idx: int):
+        canvas = getattr(self, "_presets_canvas", None)
+        if canvas is None or not (0 <= idx < len(self._row_frames)):
+            return
+        try:
+            canvas.update_idletasks()
+            row = self._row_frames[idx]
+            y = row.winfo_y()
+            height = max(row.winfo_height(), 1)
+            total = max(self._presets_rows_frame.winfo_height(), 1)
+            view_top = canvas.canvasy(0)
+            view_h = max(canvas.winfo_height(), 1)
+            if y < view_top:
+                canvas.yview_moveto(y / total)
+            elif y + height > view_top + view_h:
+                canvas.yview_moveto(max(0.0, (y + height - view_h) / total))
+        except tk.TclError:
+            pass
 
     def _send_from_row(self, var: dict):
         mode = var["mode"].get()
@@ -647,6 +733,7 @@ class SerialAssistant(ttk.PanedWindow):
         self._do_send_raw(mode=mode, data=data)
 
     def _del_preset_row(self, idx: int):
+        self._sync_presets_from_rows()
         if 0 <= idx < len(self._presets_data):
             del self._presets_data[idx]
             self._rebuild_preset_rows()
@@ -1166,10 +1253,12 @@ class SerialAssistant(ttk.PanedWindow):
         dlg = PresetDialog(self, title="添加预设")
         self.wait_window(dlg.top)
         if dlg.result:
+            self._sync_presets_from_rows()
             self._presets_data.append(dlg.result)
             self._rebuild_preset_rows()
 
     def _on_edit_preset(self):
+        self._sync_presets_from_rows()
         sel = self._presets_rows_frame.focus_get()
         idx = None
         for i, row in enumerate(self._row_frames):
@@ -1186,6 +1275,7 @@ class SerialAssistant(ttk.PanedWindow):
             self._rebuild_preset_rows()
 
     def _on_del_preset(self):
+        self._sync_presets_from_rows()
         if self._presets_data:
             self._presets_data.pop()
             self._rebuild_preset_rows()
