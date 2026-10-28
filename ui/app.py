@@ -295,6 +295,8 @@ class EpmDlApp(tk.Tk):
         self._zoom = layout_scale
         init_ui_scaling(self, layout_scale)
         self._startup_layout_done = False
+        # 用户拖好的左右分隔比例：窗口最大化 / 换显示器重排后按它摆回去
+        self._hpaned_ratio: Optional[float] = None
         # 样式的字号与命名字体（TkDefaultFont 等）都在这里按 layout_scale 设好，
         # 子控件创建时拿到的就是缩放后的字体
         init_ui_theme(self)
@@ -495,6 +497,8 @@ class EpmDlApp(tk.Tk):
         self.hpaned.grid(row=0, column=0, sticky=tk.NSEW)
         # 窗口变窄时夹紧分隔条，保证右栏控件不被裁（同 VS Code 侧栏最小宽）
         self.hpaned.bind("<Configure>", self._on_hpaned_resize)
+        # 拖完分隔条记住比例（拖拽事件落在 hpaned 自己身上，不会冒泡到子控件）
+        self.hpaned.bind("<ButtonRelease-1>", self._remember_hpaned_ratio, add="+")
         try:
             style = ttk.Style()
             style.configure("Sash.Horizontal.TPanedwindow", sashthickness=6)
@@ -576,11 +580,28 @@ class EpmDlApp(tk.Tk):
             else:
                 pos = initial_h_sash(total, right_need, left_need)
             self.hpaned.sashpos(0, pos)
+            self._hpaned_ratio = pos / float(total)
         except Exception:
             pass
 
+    def _remember_hpaned_ratio(self, event=None):
+        """记下用户拖好的左右分隔比例。"""
+        if event is not None and event.widget is not self.hpaned:
+            return
+        try:
+            total = self.hpaned.winfo_width()
+            if total > 200:
+                self._hpaned_ratio = self.hpaned.sashpos(0) / float(total)
+        except tk.TclError:
+            pass
+
     def _on_hpaned_resize(self, event=None):
-        """窗口变窄/缩放时夹紧分隔条：右栏不能被压到装不下。
+        """窗口尺寸变化后按用户设的比例重摆分隔条，并保证右栏不被压到装不下。
+
+        ttk.PanedWindow 在窗口变大时把多出来的宽度按 weight(3:2) 分给两栏，
+        所以最大化、或者从别的显示器拖回来（会先还原再最大化）之后，用户
+        拖窄的那一栏会被撑开，看上去就像分隔条“恢复默认值”。这里记住比例，
+        尺寸一变就按比例摆回去。
 
         同 VS Code 的侧栏最小宽度 —— 拖不到比最小宽度更窄，右栏的按钮
         才不会被裁掉。
@@ -589,10 +610,16 @@ class EpmDlApp(tk.Tk):
             total = self.hpaned.winfo_width()
             if total <= 200:
                 return
-            right_need = self._right_frame.winfo_reqwidth() + scale_px(self, 8)
+            left_min = scale_px(self, 200)
             pos = self.hpaned.sashpos(0)
+            if self._hpaned_ratio is not None:
+                target = int(total * self._hpaned_ratio)
+                target = max(left_min, min(target, total - left_min))
+                if abs(target - pos) > 1:
+                    self.hpaned.sashpos(0, target)
+                    pos = target
+            right_need = self._right_frame.winfo_reqwidth() + scale_px(self, 8)
             if total - pos < right_need:
-                left_min = scale_px(self, 200)
                 self.hpaned.sashpos(0, max(left_min, total - right_need))
         except tk.TclError:
             pass
@@ -1487,6 +1514,8 @@ class EpmDlApp(tk.Tk):
         """缩放后按原比例重摆分隔条（字体变大后右栏/发送区的最小尺寸也变大）。"""
         try:
             total = self.hpaned.winfo_width()
+            if h_ratio is not None:
+                self._hpaned_ratio = h_ratio
             if h_ratio is not None and total > 200:
                 right_need = (self._right_frame.winfo_reqwidth()
                               + scale_px(self, 8))
