@@ -592,6 +592,22 @@ class SerialAssistant(ttk.PanedWindow):
             self._rebuild_preset_rows()
 
     def _on_clear_presets(self):
+        """清空「列表发送」的全部条目：有内容时先弹窗确认。
+
+        弹窗挂在 app 的 toplevel 上，Windows 会把它居中在主窗口内，
+        不会跑到屏幕外。
+        """
+        if not self._presets_data:
+            return
+        parent = self.winfo_toplevel()
+        ok = messagebox.askyesno(
+            "清空列表发送",
+            f"确定清空列表发送的全部 {len(self._presets_data)} 条吗？\n\n"
+            "清空后无法恢复（下次启动会恢复为内置默认项）。",
+            parent=parent,
+        )
+        if not ok:
+            return
         self._presets_data.clear()
         self._rebuild_preset_rows()
 

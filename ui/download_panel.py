@@ -571,13 +571,12 @@ class DownloadPanel(ttk.LabelFrame):
         addr = info.get("addr", 0) if info else 0
         fg = self._COLOR_MANUAL if is_manual else self._COLOR_AUTO
         if exists:
-            file_size = os.path.getsize(full)
             self._file_labels[key].configure(
                 text=f"{fname}  →  0x{addr:08x}", foreground=fg)
-            # 状态列带上文件大小：擦除范围 = 文件大小向上对齐 4K
+            # 状态列宽度有限（width=9），只放"自动/手动"；文件大小在下载日志里
+            # （file=0x… / erase=0x…）能看到
             status = "✓ 手动" if is_manual else "✓ 自动"
-            self._status_labels[key].configure(
-                text=f"{status} 0x{file_size:x}", foreground=self._COLOR_OK)
+            self._status_labels[key].configure(text=status, foreground=self._COLOR_OK)
         else:
             self._file_labels[key].configure(
                 text=f"{fname}  (不存在)", foreground=self._COLOR_ERR)
