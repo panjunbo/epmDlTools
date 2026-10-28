@@ -26,7 +26,10 @@ from .download_panel import DownloadPanel
 from .erase_read_panel import EraseReadPanel
 from .serial_assistant import SerialAssistant
 from .serial_panel import SerialPanel, SerialParamDialog
-from .theme import init_ui_theme, normalize_tk_scaling, scale_px
+from .theme import (
+    apply_ui_zoom, init_ui_theme, init_ui_scaling,
+    refresh_ui_fonts, scale_px,
+)
 
 if TYPE_CHECKING:
     from commands.base import SerialManager
@@ -276,15 +279,24 @@ def initial_h_sash(total: int, right_need: int, left_need: int) -> int:
 
 
 class EpmDlApp(tk.Tk):
-    # 窗口尺寸限制：保证 UI 控件在不同显示器上都不会被截断
-    MIN_WIDTH = 1000
-    MIN_HEIGHT = 640
+    # 窗口尺寸下限（会被右栏内容的实际需要抬高，见 _apply_scaled_minsize）
+    MIN_WIDTH = 640
+    MIN_HEIGHT = 480
 
     def __init__(self, cfg: dict, cm: ConfigManager, logger: Logger):
         super().__init__()
-        # 固定 100% 排版，再创建字体和控件。系统 150% 时布局仍与 100% 相同。
-        normalize_tk_scaling(self)
+        # 界面缩放跟随系统显示缩放（VS Code 模型）：物理大小跟系统走，
+        # 布局比例不变（像素间距与字号用同一系数放大）。
+        # layout_scale 可再乘一档（1.25 = 比系统再大 25%）。
+        try:
+            layout_scale = float(cm.get("ui", "layout_scale", "1.0") or 1.0)
+        except (TypeError, ValueError):
+            layout_scale = 1.0
+        self._zoom = layout_scale
+        init_ui_scaling(self, layout_scale)
         self._startup_layout_done = False
+        # 样式的字号与命名字体（TkDefaultFont 等）都在这里按 layout_scale 设好，
+        # 子控件创建时拿到的就是缩放后的字体
         init_ui_theme(self)
         self.title(f"EPM Download Tool  v{__version__}")
         icon = app_icon_path()
@@ -410,20 +422,38 @@ class EpmDlApp(tk.Tk):
         self.serial_panel.refresh_ports()
         self.dl_panel.enable_refresh()
         self.dl_panel.refresh_bins()
-        # bin 文件名填上之后右侧需要的宽度才稳定，再摆一次分隔条
+        # bin 文件名填上之后右侧需要的宽度才稳定，再摆一次分隔条、算一次最小窗口
+        self._apply_scaled_minsize()
         self._set_hpaned_initial_position()
 
     def _apply_scaled_minsize(self):
-        """最小窗口随系统缩放变大，但不超过当前屏幕。"""
+        """最小窗口随系统缩放变大，且不小于右栏内容的实际需要。
+
+        固定值只是底线：真正决定下限的是右栏（串口 + 擦除 + 下载）的
+        reqwidth/reqheight，否则窗口缩小到最后会把下面几行控件裁掉。
+        上限不超过当前屏幕（小屏 + 大缩放时仍能打开）。
+        """
         sw = max(1, self.winfo_screenwidth())
         sh = max(1, self.winfo_screenheight())
+        need_w = scale_px(self, self.MIN_WIDTH)
+        need_h = scale_px(self, self.MIN_HEIGHT)
+        right = getattr(self, "_right_frame", None)
+        if right is not None:
+            try:
+                self.update_idletasks()
+                need_w = max(need_w,
+                             right.winfo_reqwidth() + scale_px(self, 240))
+                need_h = max(need_h, right.winfo_reqheight() + scale_px(self, 8))
+            except tk.TclError:
+                pass
         self.minsize(
-            min(scale_px(self, self.MIN_WIDTH), max(800, sw - 40)),
-            min(scale_px(self, self.MIN_HEIGHT), max(480, sh - 80)),
+            min(need_w, max(640, sw - 40)),
+            min(need_h, max(480, sh - 80)),
         )
 
     def _build_menu(self):
         menubar = tk.Menu(self)
+        self._menubar = menubar
         m_file = tk.Menu(menubar, tearoff=0)
         m_file.add_command(label="打开配置文件", command=self._open_config_file)
         m_file.add_command(label="加载 Log...", command=self._load_log_file)
@@ -432,6 +462,18 @@ class EpmDlApp(tk.Tk):
         m_file.add_separator()
         m_file.add_command(label="退出", command=self._on_close)
         menubar.add_cascade(label="文件", menu=m_file)
+        m_view = tk.Menu(menubar, tearoff=0)
+        m_view.add_command(label="界面放大", accelerator="Ctrl+=",
+                           command=self._zoom_in)
+        m_view.add_command(label="界面缩小", accelerator="Ctrl+-",
+                           command=self._zoom_out)
+        m_view.add_command(label="界面缩放重置", accelerator="Ctrl+0",
+                           command=self._zoom_reset)
+        m_view.add_separator()
+        m_view.add_command(label="接收区字号增大", command=lambda: self._recv_font_step(1))
+        m_view.add_command(label="接收区字号减小", command=lambda: self._recv_font_step(-1))
+        m_view.add_command(label="接收区字号重置", command=self._recv_font_reset)
+        menubar.add_cascade(label="视图", menu=m_view)
         m_help = tk.Menu(menubar, tearoff=0)
         m_help.add_command(label="关于", command=self._show_about)
         menubar.add_cascade(label="帮助", menu=m_help)
@@ -439,6 +481,11 @@ class EpmDlApp(tk.Tk):
         m_guide.add_command(label="回读模式切换", command=self._show_guide_read_toggle)
         menubar.add_cascade(label="使用指南", menu=m_guide)
         self.config(menu=menubar)
+        # 快捷键：界面缩放（同 VS Code 的 Ctrl+= / Ctrl+- / Ctrl+0）
+        self.bind_all("<Control-Key-equal>", lambda e: self._zoom_in())
+        self.bind_all("<Control-Key-plus>", lambda e: self._zoom_in())
+        self.bind_all("<Control-Key-minus>", lambda e: self._zoom_out())
+        self.bind_all("<Control-Key-0>", lambda e: self._zoom_reset())
 
     def _build_layout(self):
         self.columnconfigure(0, weight=1)
@@ -446,6 +493,8 @@ class EpmDlApp(tk.Tk):
 
         # 顶层 hpaned 占满 self
         self.hpaned.grid(row=0, column=0, sticky=tk.NSEW)
+        # 窗口变窄时夹紧分隔条，保证右栏控件不被裁（同 VS Code 侧栏最小宽）
+        self.hpaned.bind("<Configure>", self._on_hpaned_resize)
         try:
             style = ttk.Style()
             style.configure("Sash.Horizontal.TPanedwindow", sashthickness=6)
@@ -501,7 +550,9 @@ class EpmDlApp(tk.Tk):
             right_need = self._right_frame.winfo_reqwidth() + scale_px(self, 8)
             left_need = scale_px(self, 200)
             try:
-                left_need = self.assistant._toolbar1.winfo_reqwidth() + scale_px(self, 8)
+                # FlowFrame 用 place 摆子控件，reqwidth 不代表内容宽度，
+                # 由工具栏自己给出不折行时的宽度
+                left_need = self.assistant.toolbar_width_hint() + scale_px(self, 8)
             except Exception:
                 pass
             # 仅当 ini 里显式写过比例时恢复；不要用 ensure_defaults 的占位值
@@ -518,10 +569,32 @@ class EpmDlApp(tk.Tk):
                 left_min = scale_px(self, 200)
                 right_min = scale_px(self, 280)
                 pos = max(left_min, min(int(total * ratio), total - right_min))
+                # 右侧控件放不下时按实际需要给宽度：比例只是偏好，
+                # 挤不下时右栏的按钮会被挤出屏幕（125% 布局下更明显）
+                if total - pos < right_need:
+                    pos = max(left_min, total - right_need)
             else:
                 pos = initial_h_sash(total, right_need, left_need)
             self.hpaned.sashpos(0, pos)
         except Exception:
+            pass
+
+    def _on_hpaned_resize(self, event=None):
+        """窗口变窄/缩放时夹紧分隔条：右栏不能被压到装不下。
+
+        同 VS Code 的侧栏最小宽度 —— 拖不到比最小宽度更窄，右栏的按钮
+        才不会被裁掉。
+        """
+        try:
+            total = self.hpaned.winfo_width()
+            if total <= 200:
+                return
+            right_need = self._right_frame.winfo_reqwidth() + scale_px(self, 8)
+            pos = self.hpaned.sashpos(0)
+            if total - pos < right_need:
+                left_min = scale_px(self, 200)
+                self.hpaned.sashpos(0, max(left_min, total - right_need))
+        except tk.TclError:
             pass
 
     def _get_hpaned_sash_ratio(self) -> Optional[float]:
@@ -1367,6 +1440,99 @@ class EpmDlApp(tk.Tk):
             + "\n\n请检查 config.ini 里 [chip_xxx] 的地址，或换一个更小的 bin。",
             parent=self,
         )
+
+    def _zoom_in(self):
+        self._set_zoom(self._zoom * 1.15)
+
+    def _zoom_out(self):
+        self._set_zoom(self._zoom / 1.15)
+
+    def _zoom_reset(self):
+        self._set_zoom(1.0)
+
+    def _set_zoom(self, zoom: float):
+        """界面缩放（相对系统显示缩放的倍率，1.0 = 跟随系统）。
+
+        不能靠改 tk scaling：Tk 改 scaling 后已创建的控件不会重绘。
+        这里改字号磅值（ttk 样式 + 命名字体 + 各面板显式字体），像素间距
+        由 scale_px() 按同一倍率放大，整界面等比缩放（同 VS Code 的 zoom）。
+        """
+        try:
+            zoom = round(max(0.5, min(3.0, float(zoom))), 3)
+        except (TypeError, ValueError):
+            zoom = 1.0
+        self._zoom = zoom
+        self.cm.set("ui", "layout_scale", f"{zoom:g}")
+        try:
+            self.cm.save()
+        except Exception as e:
+            self.logger.error(f"保存界面缩放失败: {e}")
+        # 记录当前分隔条比例：字号变大后按比例重摆，不跳回 ini 里的旧值
+        h_ratio = self._get_hpaned_sash_ratio()
+        recv_ratio = self.assistant.get_recv_send_ratio()
+        apply_ui_zoom(zoom)
+        # 顺序：ttk 样式 + 命名字体 → 各面板显式字体 → 折行重排
+        fonts = refresh_ui_fonts(self)
+        self._apply_menu_font(fonts)
+        self.serial_panel.refresh_fonts()
+        self.erase_read_panel.refresh_fonts()
+        self.dl_panel.refresh_fonts()
+        self.assistant.refresh_fonts()
+        self.update_idletasks()
+        self._apply_scaled_minsize()
+        self._restore_sash_ratios(h_ratio, recv_ratio)
+        self.logger.info(f"界面缩放: {zoom * 100:.0f}%")
+
+    def _restore_sash_ratios(self, h_ratio, recv_ratio):
+        """缩放后按原比例重摆分隔条（字体变大后右栏/发送区的最小尺寸也变大）。"""
+        try:
+            total = self.hpaned.winfo_width()
+            if h_ratio is not None and total > 200:
+                right_need = (self._right_frame.winfo_reqwidth()
+                              + scale_px(self, 8))
+                left_min = scale_px(self, 200)
+                pos = max(left_min, min(int(total * h_ratio),
+                                        total - right_need))
+                self.hpaned.sashpos(0, pos)
+        except tk.TclError:
+            pass
+        if recv_ratio is not None:
+            self.assistant.apply_recv_send_split(recv_ratio)
+
+    def _apply_menu_font(self, fonts):
+        """菜单是 tk.Menu（不走 ttk 样式），缩放后要逐个重设字体。"""
+        def walk(menu):
+            try:
+                menu.configure(font=fonts.ui_normal)
+            except tk.TclError:
+                return
+            for child in menu.winfo_children():
+                if isinstance(child, tk.Menu):
+                    walk(child)
+        menubar = getattr(self, "_menubar", None)
+        if menubar is not None:
+            walk(menubar)
+
+    def _recv_font_step(self, step: int):
+        self.assistant.set_recv_font_size(
+            self.assistant.get_recv_font_size() + step)
+        # 读回实际值：set 会夹到 8~28，不能把越界的请求值存进 ini
+        size = self.assistant.get_recv_font_size()
+        self.cm.set("ui", "recv_font_size", str(size))
+        try:
+            self.cm.save()
+        except Exception as e:
+            self.logger.error(f"保存接收区字号失败: {e}")
+        self.logger.info(f"接收区字号: {size}")
+
+    def _recv_font_reset(self):
+        self.assistant.set_recv_font_size(10)
+        self.cm.set("ui", "recv_font_size", "10")
+        try:
+            self.cm.save()
+        except Exception as e:
+            self.logger.error(f"保存接收区字号失败: {e}")
+        self.logger.info("接收区字号: 10")
 
     def _set_running(self, running: bool, serial_opened: bool = False):
         """下载/擦除/回读任务进行状态：同时控制 下载面板 / 擦除回读面板 / 串口面板 的灰化。

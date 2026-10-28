@@ -10,8 +10,9 @@ from utils.logger import make_default_logger
 def _enable_dpi_awareness():
     """窗口使用显示器真实像素，避免 150% 时被系统整窗拉伸变糊、逻辑分辨率变小。
 
-    界面字号仍固定在 100%（见 ui.theme.normalize_tk_scaling）。这里只用
-    Per-Monitor V2，让系统主题和 Tk 画在同一套像素上。
+    界面缩放跟随系统 DPI（见 ui.theme.init_ui_scaling），布局靠
+    FlowFrame 折行 / 最小宽度自适应。这里只用 Per-Monitor V2，让系统主题和
+    Tk 画在同一套像素上。
     ``SetProcessDpiAwareness(2)`` 是旧的 V1，150% 时主题和字体会错位。
     """
     if sys.platform != "win32":

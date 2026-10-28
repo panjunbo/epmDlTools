@@ -1,12 +1,13 @@
 import os
 import tkinter as tk
+import tkinter.font as tkfont
 from datetime import datetime
 from tkinter import ttk, filedialog, messagebox
 from typing import Callable, Dict, List, Optional
 
 from utils.app_paths import dialog_initial_dir
 
-from .theme import get_ui_fonts, scale_px
+from .theme import ellipsize, get_ui_fonts, scale_px
 
 _STATUS_MAX_LINES = 400
 
@@ -60,6 +61,10 @@ class DownloadPanel(ttk.LabelFrame):
         self._id_log_status: Dict[str, ttk.Label] = {}
         self._id_log_buttons: Dict[str, ttk.Button] = {}
         self._id_log_reset_buttons: Dict[str, ttk.Button] = {}
+        self._full_text: Dict[str, str] = {}          # bin 文件名完整文本（截断前）
+        self._full_idlog_text: Dict[str, str] = {}    # id log 文件名完整文本
+        self._fit_font: Optional[tkfont.Font] = None   # 截断用的字体度量（缩放后重建）
+        self._fit_job: Optional[str] = None            # after_idle 合并多次重排
         self._resolved: Dict[str, Optional[str]] = {}     # bin 文件名
         self._paths: Dict[str, Optional[str]] = {}        # bin 绝对路径（手动选择时）
         self._manual_selection: Dict[str, bool] = {}      # bin 手动选择标记
@@ -150,7 +155,7 @@ class DownloadPanel(ttk.LabelFrame):
                 anchor=tk.W, font=file_font, width=8,
             )
             self._file_labels[key].grid(row=i, column=2, sticky=tk.EW, padx=2)
-            self._status_labels[key] = ttk.Label(self._bins_top, text="", width=9)
+            self._status_labels[key] = ttk.Label(self._bins_top, text="", width=6)
             self._status_labels[key].grid(row=i, column=3, padx=2)
             self._file_buttons[key] = ttk.Button(
                 self._bins_top, text="…", width=3,
@@ -179,7 +184,7 @@ class DownloadPanel(ttk.LabelFrame):
                 anchor=tk.W, font=file_font, width=8,
             )
             self._id_log_labels[key].grid(row=i, column=2, sticky=tk.EW, padx=2)
-            self._id_log_status[key] = ttk.Label(self._bins_bot, text="", width=9)
+            self._id_log_status[key] = ttk.Label(self._bins_bot, text="", width=6)
             self._id_log_status[key].grid(row=i, column=3, padx=2)
             self._id_log_buttons[key] = ttk.Button(
                 self._bins_bot, text="…", width=3,
@@ -192,6 +197,10 @@ class DownloadPanel(ttk.LabelFrame):
                 state=tk.DISABLED,
             )
             self._id_log_reset_buttons[key].grid(row=i, column=5, padx=(0, 2))
+
+        # 文件名截断绑在容器上：标签自身宽度会随截断结果变化，绑标签会来回抖
+        for frame in (self._bins_top, self._bins_bot):
+            frame.bind("<Configure>", lambda e: self._schedule_fit())
 
         self._build_status_panel(dir_frame)
 
@@ -290,6 +299,7 @@ class DownloadPanel(ttk.LabelFrame):
         mono = get_ui_fonts().mono_small
         self._status_text = tk.Text(
             text_frame,
+            width=20, height=4,
             wrap=tk.WORD,
             state=tk.DISABLED,
             font=mono,
@@ -559,6 +569,8 @@ class DownloadPanel(ttk.LabelFrame):
         """刷新单个 bin 行的显示。"""
         info = self._chip_files.get(key)
         if keyword_empty or not self._resolved.get(key):
+            # 清掉截断用的原文，否则之后一 resize / 缩放又会被旧文件名顶回来
+            self._full_text.pop(key, None)
             self._file_labels[key].configure(text="(未配置)", foreground=self._COLOR_MUTED)
             self._status_labels[key].configure(text="", foreground=self._COLOR_MUTED)
             self._check_vars[key].set(False)
@@ -571,18 +583,72 @@ class DownloadPanel(ttk.LabelFrame):
         addr = info.get("addr", 0) if info else 0
         fg = self._COLOR_MANUAL if is_manual else self._COLOR_AUTO
         if exists:
+            self._full_text[key] = f"{fname}  →  0x{addr:08x}"
             self._file_labels[key].configure(
-                text=f"{fname}  →  0x{addr:08x}", foreground=fg)
-            # 状态列宽度有限（width=9），只放"自动/手动"；文件大小在下载日志里
+                text=self._full_text[key], foreground=fg)
+            self._schedule_fit()
+            # 状态列宽度有限（width=6），只放"自动/手动"；文件大小在下载日志里
             # （file=0x… / erase=0x…）能看到
             status = "✓ 手动" if is_manual else "✓ 自动"
             self._status_labels[key].configure(text=status, foreground=self._COLOR_OK)
         else:
+            self._full_text[key] = f"{fname}  (不存在)"
             self._file_labels[key].configure(
-                text=f"{fname}  (不存在)", foreground=self._COLOR_ERR)
+                text=self._full_text[key], foreground=self._COLOR_ERR)
             self._status_labels[key].configure(text="✗ 缺失", foreground=self._COLOR_ERR)
         # ini 里记的是勾选意图；文件不存在时不能勾上
         self._check_vars[key].set(bool(self._bin_selected.get(key)) and exists)
+
+    def refresh_fonts(self):
+        """界面缩放后重设字体（Tk 已创建的字体不会自动重绘）。"""
+        fonts = get_ui_fonts()
+        if self._fit_font is not None:
+            # 复用同一个命名 Tk 字体：每档缩放都新建一个会越攒越多
+            self._fit_font.configure(family=fonts.mono, size=fonts.size_mono_sm)
+        for key in self.BINARY_KEYS:
+            for lbl in (self._file_labels.get(key), self._id_log_labels.get(key)):
+                if lbl is None:
+                    continue
+                try:
+                    lbl.configure(font=fonts.mono_small)
+                except tk.TclError:
+                    pass
+        try:
+            self._status_text.configure(font=fonts.mono_small)
+        except tk.TclError:
+            pass
+        self._schedule_fit()
+
+    def _schedule_fit(self):
+        """合并多次尺寸变化，等几何稳定后再统一截断文件名。"""
+        if self._fit_job is not None:
+            return
+        try:
+            self._fit_job = self.after_idle(self._fit_all_labels)
+        except tk.TclError:
+            self._fit_job = None
+
+    def _fit_all_labels(self):
+        """按可用宽度给文件名加省略号（VS Code 的 text-overflow）。"""
+        self._fit_job = None
+        if self._fit_font is None:
+            self._fit_font = tkfont.Font(
+                root=self, font=get_ui_fonts().mono_small)
+        for labels, texts in (
+            (self._file_labels, self._full_text),
+            (self._id_log_labels, self._full_idlog_text),
+        ):
+            for key, label in labels.items():
+                full = texts.get(key)
+                if label is None or not full:
+                    continue
+                avail = label.winfo_width()
+                if avail <= 1:
+                    continue
+                try:
+                    label.configure(text=ellipsize(full, avail, self._fit_font))
+                except tk.TclError:
+                    pass
 
     def _full_path(self, key: str) -> str:
         """该 key 当前生效的 bin 路径（手动选择的绝对路径优先）。"""
@@ -603,6 +669,7 @@ class DownloadPanel(ttk.LabelFrame):
         if self._id_log_labels.get(key) is None:
             return
         if not id_log_name:
+            self._full_idlog_text.pop(key, None)
             self._id_log_labels[key].configure(text="(无)", foreground="#888")
             self._id_log_status[key].configure(text="", foreground="#888")
             return
@@ -617,7 +684,9 @@ class DownloadPanel(ttk.LabelFrame):
         display_name = (
             os.path.basename(self._id_log_paths[key]) if is_manual else id_log_name)
         fg = self._COLOR_MANUAL if is_manual else self._COLOR_AUTO
+        self._full_idlog_text[key] = display_name
         self._id_log_labels[key].configure(text=display_name, foreground=fg)
+        self._schedule_fit()
         # 文件存在性：手动选择用绝对路径，否则 bin_dir/id_log_name
         if is_manual:
             full = self._id_log_paths[key]

@@ -19,7 +19,8 @@ _RECV_FONT_MIN = 8
 _RECV_FONT_MAX = 28
 
 from communication import UartComm
-from .theme import get_ui_fonts
+from .flow import FlowFrame
+from .theme import get_ui_fonts, scaled_point_size
 from utils.app_paths import get_logs_dir
 
 
@@ -67,7 +68,8 @@ class SerialAssistant(ttk.PanedWindow):
         fonts = get_ui_fonts()
         self._mono_font = fonts.mono_normal
         self._recv_font_size = _RECV_FONT_DEFAULT
-        self._recv_font = (fonts.mono, self._recv_font_size)
+        # 接收区字号是用户设置（磅值），显示时再乘界面缩放
+        self._recv_font = (fonts.mono, scaled_point_size(self._recv_font_size))
         self._send_count = 0
         self._send_bytes = 0
         self._recv_count = 0
@@ -96,87 +98,101 @@ class SerialAssistant(ttk.PanedWindow):
         # 工具栏两行，控件均从左到右紧凑排列
         self.encoding = "latin-1"
 
-        self._toolbar1 = ttk.Frame(frame)
+        # 流式工具栏：宽度不够自动折行（窗口变窄 / 系统缩放变大时不被裁掉）
+        self._toolbar1 = FlowFrame(frame)
         self._toolbar1.pack(fill=tk.X, padx=2, pady=(2, 0))
         toolbar1 = self._toolbar1
 
-        ttk.Label(toolbar1, text="显示").pack(side=tk.LEFT, padx=(0, 2))
+        toolbar1.add(ttk.Label(toolbar1, text="显示"), padx=(0, 2))
         self.show_mode = tk.StringVar(value="ASCII")
-        ttk.Combobox(toolbar1, textvariable=self.show_mode,
-                     values=["ASCII", "HEX"], width=6, state="readonly").pack(
-            side=tk.LEFT, padx=(0, 6))
+        toolbar1.add(ttk.Combobox(toolbar1, textvariable=self.show_mode,
+                                  values=["ASCII", "HEX"], width=6, state="readonly"),
+                     padx=(0, 6))
         self.show_mode.trace_add("write", self._on_show_mode_changed)
 
-        ttk.Separator(toolbar1, orient=tk.VERTICAL).pack(
-            side=tk.LEFT, fill=tk.Y, padx=4, pady=2)
+        toolbar1.add(ttk.Separator(toolbar1, orient=tk.VERTICAL),
+                     padx=4, pady=2)
 
         self.show_ts = tk.BooleanVar(value=True)
-        ttk.Checkbutton(toolbar1, text="时间戳", variable=self.show_ts).pack(
-            side=tk.LEFT, padx=(0, 4))
+        toolbar1.add(ttk.Checkbutton(toolbar1, text="时间戳", variable=self.show_ts),
+                     padx=(0, 4))
         self.auto_scroll = tk.BooleanVar(value=True)
-        ttk.Checkbutton(toolbar1, text="自动滚屏", variable=self.auto_scroll).pack(
-            side=tk.LEFT, padx=(0, 6))
+        toolbar1.add(ttk.Checkbutton(toolbar1, text="自动滚屏", variable=self.auto_scroll),
+                     padx=(0, 6))
 
-        ttk.Separator(toolbar1, orient=tk.VERTICAL).pack(
-            side=tk.LEFT, fill=tk.Y, padx=4, pady=2)
+        toolbar1.add(ttk.Separator(toolbar1, orient=tk.VERTICAL),
+                     padx=4, pady=2)
 
-        ttk.Label(toolbar1, text="超时刷新(ms)").pack(side=tk.LEFT, padx=(0, 2))
+        # 相关的标签 + 输入框放进同一个子 Frame：折行时整组一起换行，
+        # 不会出现"超时刷新(ms)"在上一行、输入框在下一行。
+        timeout_grp = ttk.Frame(toolbar1)
+        ttk.Label(timeout_grp, text="超时刷新(ms)").pack(
+            side=tk.LEFT, padx=(0, 2))
         self.flush_timeout_var = tk.IntVar(value=100)
         self._spin_flush = ttk.Spinbox(
-            toolbar1, textvariable=self.flush_timeout_var,
+            timeout_grp, textvariable=self.flush_timeout_var,
             from_=0, to=60000, increment=50, width=5,
         )
-        self._spin_flush.pack(side=tk.LEFT, padx=(0, 6))
+        self._spin_flush.pack(side=tk.LEFT)
+        toolbar1.add(timeout_grp, padx=(0, 6))
         self.flush_timeout_var.trace_add("write", self._on_flush_timeout_changed)
         self._flush_timeout_callback: Optional[Callable[[int], None]] = None
 
-        ttk.Separator(toolbar1, orient=tk.VERTICAL).pack(
-            side=tk.LEFT, fill=tk.Y, padx=4, pady=2)
+        toolbar1.add(ttk.Separator(toolbar1, orient=tk.VERTICAL),
+                     padx=4, pady=2)
 
         self.btn_load_log = ttk.Button(
             toolbar1, text="加载Log", width=7,
             command=self._on_load_log_clicked)
-        self.btn_load_log.pack(side=tk.LEFT, padx=(0, 4))
+        toolbar1.add(self.btn_load_log, padx=(0, 4))
         self.auto_save = tk.BooleanVar(value=False)
+        save_grp = ttk.Frame(toolbar1)
         self._chk_auto_save = ttk.Checkbutton(
-            toolbar1, text="自动保存log", variable=self.auto_save,
+            save_grp, text="自动保存log", variable=self.auto_save,
             command=self._on_auto_save_toggled)
         self._chk_auto_save.pack(side=tk.LEFT, padx=(0, 2))
         self.save_path = tk.StringVar(value=self._default_save_path())
-        ttk.Button(toolbar1, text="…", width=2,
-                   command=self._choose_save_file).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(save_grp, text="…", width=2,
+                   command=self._choose_save_file).pack(side=tk.LEFT)
+        toolbar1.add(save_grp, padx=(0, 6))
 
-        ttk.Separator(toolbar1, orient=tk.VERTICAL).pack(
-            side=tk.LEFT, fill=tk.Y, padx=4, pady=2)
+        toolbar1.add(ttk.Separator(toolbar1, orient=tk.VERTICAL),
+                     padx=4, pady=2)
 
+        recv_btn_grp = ttk.Frame(toolbar1)
         self.btn_find = ttk.Button(
-            toolbar1, text="查找", width=5,
+            recv_btn_grp, text="查找", width=5,
             command=self._toggle_find_bar)
         self.btn_find.pack(side=tk.LEFT, padx=(0, 4))
-        ttk.Button(toolbar1, text="清空", command=self.clear_recv, width=5).pack(
+        ttk.Button(recv_btn_grp, text="清空",
+                   command=self.clear_recv, width=5).pack(
             side=tk.LEFT, padx=(0, 4))
-        ttk.Button(toolbar1, text="保存", command=self.save_recv_to_file, width=5).pack(
-            side=tk.LEFT)
+        ttk.Button(recv_btn_grp, text="保存",
+                   command=self.save_recv_to_file, width=5).pack(side=tk.LEFT)
+        toolbar1.add(recv_btn_grp, padx=(0, 4))
 
-        self._find_toolbar = ttk.Frame(frame)
+        # 查找栏同样用流式布局：左栏变窄时不至于把按钮裁掉
+        self._find_toolbar = FlowFrame(frame)
         self._find_var = tk.StringVar()
         self._find_combo = ttk.Combobox(
-            self._find_toolbar, textvariable=self._find_var, width=28, values=[])
-        self._find_combo.pack(side=tk.LEFT, padx=(0, 4))
+            self._find_toolbar, textvariable=self._find_var, width=20, values=[])
+        self._find_toolbar.add(self._find_combo, padx=(0, 4))
         self._find_case = tk.BooleanVar(value=False)
-        ttk.Checkbutton(
-            self._find_toolbar, text="区分大小写", variable=self._find_case,
-            command=self._on_find_options_changed,
-        ).pack(side=tk.LEFT, padx=(0, 4))
+        self._find_toolbar.add(
+            ttk.Checkbutton(
+                self._find_toolbar, text="区分大小写", variable=self._find_case,
+                command=self._on_find_options_changed),
+            padx=(0, 4))
         # 中文三字按钮需更宽，否则 ttk 会裁切导致字体显示异常
-        ttk.Button(
-            self._find_toolbar, text="上一个", width=7,
-            command=lambda: self._find_match(backward=True),
-        ).pack(side=tk.LEFT, padx=(0, 2))
-        ttk.Button(
-            self._find_toolbar, text="下一个", width=7,
-            command=lambda: self._find_match(backward=False),
-        ).pack(side=tk.LEFT)
+        self._find_toolbar.add(
+            ttk.Button(
+                self._find_toolbar, text="上一个", width=7,
+                command=lambda: self._find_match(backward=True)),
+            padx=(0, 2))
+        self._find_toolbar.add(
+            ttk.Button(
+                self._find_toolbar, text="下一个", width=7,
+                command=lambda: self._find_match(backward=False)))
 
         self._find_combo.bind("<Return>", lambda _e: self._find_match(backward=False))
         self._find_combo.bind("<Shift-Return>", lambda _e: self._find_match(backward=True))
@@ -191,7 +207,7 @@ class SerialAssistant(ttk.PanedWindow):
         text_frame.columnconfigure(0, weight=1)
 
         self.recv_text = tk.Text(
-            text_frame, wrap=tk.WORD,
+            text_frame, width=20, height=8, wrap=tk.WORD,
             font=self._recv_font, bg="#fafafa", fg="#1a1a1a",
             # 略深于背景，避免系统蓝选中与蓝色日志叠色
             selectbackground="#e6e6e6", selectforeground="#1a1a1a",
@@ -261,7 +277,7 @@ class SerialAssistant(ttk.PanedWindow):
             return
         family = self._recv_font[0]
         self._recv_font_size = size
-        self._recv_font = (family, size)
+        self._recv_font = (family, scaled_point_size(size))
         try:
             self.recv_text.configure(font=self._recv_font)
         except tk.TclError:
@@ -326,7 +342,7 @@ class SerialAssistant(ttk.PanedWindow):
         text_frame.rowconfigure(0, weight=1)
 
         self.send_text = tk.Text(
-            text_frame, height=3, wrap=tk.NONE, font=self._mono_font,
+            text_frame, width=20, height=3, wrap=tk.NONE, font=self._mono_font,
             bg="#fafafa", fg="#1a1a1a",
         )
         self.send_text.grid(row=0, column=0, sticky=tk.NSEW)
@@ -340,28 +356,30 @@ class SerialAssistant(ttk.PanedWindow):
         self.send_text.configure(xscrollcommand=sb_x.set)
         ttk.Frame(text_frame, width=8).grid(row=1, column=1)
 
-        opt = ttk.Frame(parent)
+        # 发送区底栏：流式布局，窄了自动折行；相关控件成组换行
+        opt = FlowFrame(parent)
         opt.pack(side=tk.TOP, fill=tk.X, padx=0, pady=0)
+        self._send_opts = opt
 
-        opt_left = ttk.Frame(opt)
-        opt_left.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        ttk.Label(opt_left, text="格式").pack(side=tk.LEFT, padx=(0, 2))
+        opt.add(ttk.Label(opt, text="格式"), padx=(0, 2))
         self.send_mode = tk.StringVar(value="ASCII")
-        ttk.Combobox(opt_left, textvariable=self.send_mode,
-                     values=["ASCII", "HEX"], width=6, state="readonly").pack(side=tk.LEFT)
+        opt.add(ttk.Combobox(opt, textvariable=self.send_mode,
+                             values=["ASCII", "HEX"], width=6, state="readonly"))
         self.append_lf = tk.BooleanVar(value=True)
-        ttk.Checkbutton(opt_left, text="\\n", variable=self.append_lf).pack(side=tk.LEFT, padx=(2, 0))
+        opt.add(ttk.Checkbutton(opt, text="\\n", variable=self.append_lf), padx=(2, 0))
         self.append_cr = tk.BooleanVar(value=False)
-        ttk.Checkbutton(opt_left, text="\\r", variable=self.append_cr).pack(side=tk.LEFT, padx=(2, 0))
+        opt.add(ttk.Checkbutton(opt, text="\\r", variable=self.append_cr), padx=(2, 0))
         self.auto_send = tk.BooleanVar(value=False)
-        ttk.Checkbutton(opt_left, text="定时(ms)", variable=self.auto_send).pack(side=tk.LEFT, padx=(4, 0))
+        opt.add(ttk.Checkbutton(opt, text="定时(ms)", variable=self.auto_send), padx=(4, 0))
         self.auto_period = tk.StringVar(value="1000")
-        ttk.Entry(opt_left, textvariable=self.auto_period, width=5).pack(side=tk.LEFT, padx=(2, 0))
+        opt.add(ttk.Entry(opt, textvariable=self.auto_period, width=5), padx=(2, 0))
 
-        opt_btns = ttk.Frame(opt)
-        opt_btns.pack(side=tk.RIGHT)
-        ttk.Button(opt_btns, text="发送", command=self._do_send, width=5).pack(side=tk.LEFT, padx=(0, 2))
-        ttk.Button(opt_btns, text="清空", command=self.clear_send, width=5).pack(side=tk.LEFT)
+        send_btn_grp = ttk.Frame(opt)
+        ttk.Button(send_btn_grp, text="发送", command=self._do_send,
+                   width=5).pack(side=tk.LEFT, padx=(0, 2))
+        ttk.Button(send_btn_grp, text="清空", command=self.clear_send,
+                   width=5).pack(side=tk.LEFT)
+        opt.add(send_btn_grp, padx=(4, 0))
 
     def _build_action_area(self):
         parent = self._action_pane
@@ -464,11 +482,53 @@ class SerialAssistant(ttk.PanedWindow):
 
     def _ensure_preset_styles(self):
         """列表框和按键与下载路径框同一字号。"""
-        if getattr(self, "_preset_style_ready", False):
-            return
         font = get_ui_fonts().ui_small
         ttk.Style(self).configure("Preset.TButton", font=font, padding=(4, 0))
         self._preset_style_ready = True
+
+    def toolbar_width_hint(self) -> int:
+        """接收区工具栏不折行时需要的最小宽度（给分隔条初始位置用）。"""
+        widths = []
+        for bar in (getattr(self, "_toolbar1", None),
+                    getattr(self, "_find_toolbar", None),
+                    getattr(self, "_send_opts", None)):
+            if bar is None:
+                continue
+            try:
+                widths.append(bar.content_width())
+            except tk.TclError:
+                pass
+        return max(widths, default=0)
+
+    def refresh_fonts(self):
+        """界面缩放后按新字号重设字体（已创建的控件不会自动重绘）。"""
+        fonts = get_ui_fonts()
+        self._mono_font = fonts.mono_normal
+        self._recv_font = (fonts.mono, scaled_point_size(self._recv_font_size))
+        for widget, font in (
+            (getattr(self, "recv_text", None), self._recv_font),
+            (getattr(self, "send_text", None), self._mono_font),
+        ):
+            if widget is None:
+                continue
+            try:
+                widget.configure(font=font)
+            except tk.TclError:
+                pass
+        self._ensure_preset_styles()
+        # 预设行的输入框/下拉按新字体重建
+        if hasattr(self, "_presets_rows_frame"):
+            self._rebuild_preset_rows()
+        # 字号变了，工具栏的 reqwidth 也变了：重新折行
+        for bar in (getattr(self, "_toolbar1", None),
+                    getattr(self, "_find_toolbar", None),
+                    getattr(self, "_send_opts", None)):
+            if bar is None:
+                continue
+            try:
+                bar.reflow()
+            except tk.TclError:
+                pass
 
     def _apply_combo_font(self, combo: ttk.Combobox, font):
         try:

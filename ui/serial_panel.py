@@ -155,9 +155,11 @@ class SerialPanel(ttk.LabelFrame):
 
         ttk.Label(self, text="端口").grid(
             row=0, column=0, sticky=tk.W, padx=_label_padx, pady=2)
+        # width 是"最小宽度"（字符数）：给一个小的下限，窄了由 grid 收缩、
+        # 宽了由 sticky=EW 拉伸，端口名放不下时 Tk 自己截断
         self.cmb_port = ttk.Combobox(
             self, textvariable=self.port_label, values=["COM5"],
-            width=22, state="readonly")
+            width=10, state="readonly")
         self.cmb_port.grid(row=0, column=1, sticky=tk.EW, padx=(4, 8), pady=2)
         self.cmb_port.configure(postcommand=self._schedule_port_popdown)
         self.cmb_port.bind("<<ComboboxSelected>>", self._on_port_selected)
@@ -165,13 +167,13 @@ class SerialPanel(ttk.LabelFrame):
         ttk.Label(self, text="日志").grid(
             row=1, column=0, sticky=tk.W, padx=_label_padx, pady=2)
         self.cmb_log = ttk.Combobox(self, textvariable=self.log_baud, values=BAUD_RATES,
-                                    width=12, state="readonly")
+                                    width=8, state="readonly")
         self.cmb_log.grid(row=1, column=1, sticky=tk.EW, padx=(4, 8), pady=2)
 
         ttk.Label(self, text="下载").grid(
             row=2, column=0, sticky=tk.W, padx=_label_padx, pady=2)
         self.cmb_dl = ttk.Combobox(self, textvariable=self.dl_baud, values=BAUD_RATES,
-                                   width=12, state="readonly")
+                                   width=8, state="readonly")
         self.cmb_dl.grid(row=2, column=1, sticky=tk.EW, padx=(4, 8), pady=2)
         for combo in (self.cmb_port, self.cmb_log, self.cmb_dl):
             self._apply_field_font(combo)
@@ -190,6 +192,11 @@ class SerialPanel(ttk.LabelFrame):
             row=3, column=0, columnspan=2, sticky=tk.W, padx=_label_padx, pady=2)
         ttk.Label(self, textvariable=self.params_summary, foreground="#888").grid(
             row=3, column=2, sticky=tk.E, padx=_label_padx, pady=2)
+
+    def refresh_fonts(self):
+        """界面缩放后重设字体（已创建的控件不会自动重绘）。"""
+        for combo in (self.cmb_port, self.cmb_log, self.cmb_dl):
+            self._apply_field_font(combo)
 
     def _apply_field_font(self, combo: ttk.Combobox):
         """框内文字与下拉列表都用小一号，和端口框一致。"""

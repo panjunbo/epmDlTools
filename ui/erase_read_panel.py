@@ -50,17 +50,21 @@ class EraseReadPanel(ttk.LabelFrame):
             ("回读大小", self.read_size),
         ]
         # 不设 width：四个汉字比 width=7 个西文更宽，会被裁成「除地址」
-        label_font = tkfont.Font(root=self, font=get_ui_fonts().ui_normal)
+        # 复用一个 Font 对象量文字宽度（每次新建 tkfont.Font 都会在 Tk 里
+        # 留下一个命名字体，缩放到处刷新时会越攒越多）
+        self._label_font = tkfont.Font(root=self, font=get_ui_fonts().ui_normal)
         self.columnconfigure(
             0, weight=0,
-            minsize=max(label_font.measure(text) for text, _var in rows) + 6,
+            minsize=max(self._label_font.measure(text) for text, _var in rows) + 6,
         )
+        # 地址框所在列可伸缩：窄了收缩、宽了拉伸（不写死字符宽度）
+        self.columnconfigure(1, weight=1, minsize=60)
         field_font = get_ui_fonts().ui_small
         for i, (text, var) in enumerate(rows):
             ttk.Label(self, text=text, anchor=tk.E).grid(
                 row=i, column=0, sticky=tk.E, padx=(2, 4), pady=4)
-            entry = ttk.Entry(self, textvariable=var, width=12, font=field_font)
-            entry.grid(row=i, column=1, sticky=tk.W, padx=(0, 8), pady=4)
+            entry = ttk.Entry(self, textvariable=var, width=8, font=field_font)
+            entry.grid(row=i, column=1, sticky=tk.EW, padx=(0, 8), pady=4)
             self._entries.append(entry)
 
         self.btn_erase = ttk.Button(self, text="擦除", command=self._do_erase, width=8)
@@ -73,6 +77,21 @@ class EraseReadPanel(ttk.LabelFrame):
         self.btn_open_dir = ttk.Button(
             self, text="打开目录", command=self._do_open_dir, width=8)
         self.btn_open_dir.grid(row=3, column=2, sticky=tk.W, padx=(8, 2), pady=4)
+
+    def refresh_fonts(self):
+        """界面缩放后重设字体，并按新字号重算标签列宽。"""
+        fonts = get_ui_fonts()
+        for entry in self._entries:
+            try:
+                entry.configure(font=fonts.ui_small)
+            except tk.TclError:
+                pass
+        self._label_font.configure(family=fonts.ui, size=fonts.size_ui)
+        texts = [w.cget("text") for w in self.winfo_children()
+                 if isinstance(w, ttk.Label)]
+        if texts:
+            self.columnconfigure(
+                0, minsize=max(self._label_font.measure(t) for t in texts) + 6)
 
     def _do_erase(self):
         if self._on_erase:

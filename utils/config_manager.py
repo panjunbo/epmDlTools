@@ -116,6 +116,10 @@ class ConfigManager:
                 "theme": "light",
                 "auto_scroll": "true",
                 "recv_font_size": "10",
+                # 界面缩放：1.0 = 完全跟随系统显示缩放（VS Code 模型）；
+                # 1.25 = 比系统再大 25%。字号是磅值、像素间距按同一系数放大，
+                # 所以布局比例恒定，只是物理大小跟着变。
+                "layout_scale": "1.0",
                 # hpaned_sash_ratio：不设默认；缺失时用控件宽度算法，拖拽关闭后才写入
                 "window_geometry": "1100x700",
                 "find_history": "",
