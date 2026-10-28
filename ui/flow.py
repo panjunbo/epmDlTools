@@ -31,11 +31,12 @@ def _norm_pad(v) -> Tuple[int, int]:
 class FlowFrame(ttk.Frame):
     """按宽度自动换行的容器。"""
 
-    def __init__(self, master, **kw):
+    def __init__(self, master, align: str = "left", **kw):
         super().__init__(master, **kw)
         # [(widget, pad_l, pad_r, pad_t, pad_b)]
         self._items: List[Tuple[ttk.Widget, int, int, int, int]] = []
         self._rows = 1
+        self._align = "right" if align == "right" else "left"
         # 字号变化后 ttk 控件的 reqwidth 要等空闲才更新，第一遍可能用旧值排版；
         # 每次 reflow 后再补一遍（只补一次，不会无限循环）
         self._idle_pending = False
@@ -90,19 +91,30 @@ class FlowFrame(ttk.Frame):
         if row:
             rows.append(row)
 
-        # 2) 每行先按非分隔条控件算行高，再把竖直分隔条拉到行高
+        # 2) 每行按最高控件定行高；子控件上下居中；可选右对齐；竖分隔条拉满行高
         y = 0
         for row in rows:
             heights = [w.winfo_reqheight() + pt + pb
                        for (w, _pl, _pr, pt, pb), _x in row
                        if not self._is_vsep(w)]
             row_h = max(heights, default=1)
+            if self._align == "right" and row:
+                last_item, last_x = row[-1]
+                lw, _pl, lpr, _pt, _pb = last_item
+                used = last_x + lw.winfo_reqwidth() + lpr
+                x_off = max(0, width - used)
+            else:
+                x_off = 0
             for (w, pl, _pr, pt, pb), x in row:
+                px = x + pl + x_off
                 if self._is_vsep(w):
-                    w.place(x=x + pl, y=y + pt,
+                    w.place(x=px, y=y + pt,
                             height=max(1, row_h - pt - pb))
                 else:
-                    w.place(x=x + pl, y=y + pt)
+                    wh = w.winfo_reqheight()
+                    avail = max(0, row_h - pt - pb)
+                    cy = y + pt + max(0, (avail - wh) // 2)
+                    w.place(x=px, y=cy)
             y += row_h
 
         if y != self.winfo_height() or len(rows) != self._rows:

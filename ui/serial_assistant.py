@@ -335,30 +335,28 @@ class SerialAssistant(ttk.PanedWindow):
         self.recv_text.see(tk.INSERT)
 
     def _build_send(self, parent):
-        """发送框随分隔条伸缩；格式行固定在发送框下方。"""
-        text_frame = ttk.Frame(parent)
-        text_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=0, pady=0)
-        text_frame.columnconfigure(0, weight=1)
-        text_frame.rowconfigure(0, weight=1)
+        """发送框随分隔条伸缩；格式/定时等在切换栏「列表」右侧。"""
+        parent.columnconfigure(0, weight=1)
+        parent.rowconfigure(0, weight=1)
 
         self.send_text = tk.Text(
-            text_frame, width=20, height=3, wrap=tk.NONE, font=self._mono_font,
+            parent, width=20, height=3, wrap=tk.NONE, font=self._mono_font,
             bg="#fafafa", fg="#1a1a1a",
         )
         self.send_text.grid(row=0, column=0, sticky=tk.NSEW)
 
-        sb_y = ttk.Scrollbar(text_frame, orient=tk.VERTICAL, command=self.send_text.yview)
+        sb_y = ttk.Scrollbar(parent, orient=tk.VERTICAL, command=self.send_text.yview)
         sb_y.grid(row=0, column=1, sticky=tk.NS)
         self.send_text.configure(yscrollcommand=sb_y.set)
 
-        sb_x = ttk.Scrollbar(text_frame, orient=tk.HORIZONTAL, command=self.send_text.xview)
+        sb_x = ttk.Scrollbar(parent, orient=tk.HORIZONTAL, command=self.send_text.xview)
         sb_x.grid(row=1, column=0, sticky=tk.EW)
         self.send_text.configure(xscrollcommand=sb_x.set)
-        ttk.Frame(text_frame, width=8).grid(row=1, column=1)
+        ttk.Frame(parent, width=8).grid(row=1, column=1)
 
-        # 发送区底栏：流式布局，窄了自动折行；相关控件成组换行
+    def _build_send_opts(self, parent):
+        """自由发送操作条：格式 / 定时 / 清空 / 发送。"""
         opt = FlowFrame(parent)
-        opt.pack(side=tk.TOP, fill=tk.X, padx=0, pady=0)
         self._send_opts = opt
 
         opt.add(ttk.Label(opt, text="格式"), padx=(0, 2))
@@ -375,11 +373,27 @@ class SerialAssistant(ttk.PanedWindow):
         opt.add(ttk.Entry(opt, textvariable=self.auto_period, width=5), padx=(2, 0))
 
         send_btn_grp = ttk.Frame(opt)
-        ttk.Button(send_btn_grp, text="发送", command=self._do_send,
-                   width=5).pack(side=tk.LEFT, padx=(0, 2))
         ttk.Button(send_btn_grp, text="清空", command=self.clear_send,
+                   width=5).pack(side=tk.LEFT, padx=(0, 2))
+        ttk.Button(send_btn_grp, text="发送", command=self._do_send,
                    width=5).pack(side=tk.LEFT)
         opt.add(send_btn_grp, padx=(4, 0))
+        return opt
+
+    def _build_preset_toolbar(self, parent):
+        """列表发送操作条：添加 / 编辑 / 删除 / 清空。"""
+        toolbar = ttk.Frame(parent)
+        self._preset_toolbar = toolbar
+        for text, cmd in (
+            ("添加", self._on_add_preset),
+            ("编辑", self._on_edit_preset),
+            ("删除", self._on_del_preset),
+            ("清空", self._on_clear_presets),
+        ):
+            ttk.Button(
+                toolbar, text=text, command=cmd, width=5,
+            ).pack(side=tk.LEFT, padx=(0, 2))
+        return toolbar
 
     def _build_action_area(self):
         parent = self._action_pane
@@ -389,6 +403,7 @@ class SerialAssistant(ttk.PanedWindow):
         self.action_content = ttk.Frame(self.action_area)
         self.action_content.pack(fill=tk.BOTH, expand=True, padx=0, pady=0)
 
+        # 切换栏：模式 | ▶列表 | [操作条占红框位] …… 流量
         self._toggle_row = ttk.Frame(self.action_content)
         self._toggle_row.pack(side=tk.TOP, fill=tk.X, padx=0, pady=0)
         self._mode_label = ttk.Label(self._toggle_row, text="自由发送", foreground="#268bd2")
@@ -397,11 +412,18 @@ class SerialAssistant(ttk.PanedWindow):
             self._toggle_row, text="▶ 列表", command=self._toggle_action_mode, width=7,
         )
         self.btn_toggle_presets.pack(side=tk.LEFT, padx=(0, 6))
+
         self._traffic_stat_var = tk.StringVar(value="收0/0B 发0/0B")
         ttk.Label(
             self._toggle_row, textvariable=self._traffic_stat_var, foreground="#586e75",
             font=get_ui_fonts().mono_small,
         ).pack(side=tk.RIGHT)
+
+        # 「列表」右侧剩余区域：放当前模式的操作控件
+        self._mode_ops = ttk.Frame(self._toggle_row)
+        self._mode_ops.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
+        self._build_send_opts(self._mode_ops)
+        self._build_preset_toolbar(self._mode_ops)
 
         self._send_frame = ttk.Frame(self.action_content)
         self._build_send(self._send_frame)
@@ -420,7 +442,6 @@ class SerialAssistant(ttk.PanedWindow):
         # 失败弹窗显示期间禁止重新拉起定时线程
         self._auto_block = False
         self.after(500, self._check_auto_send)
-
     def _toggle_action_mode(self):
         if self.presets_visible:
             self._show_send()
@@ -433,6 +454,12 @@ class SerialAssistant(ttk.PanedWindow):
         self.presets_visible = False
         self.btn_toggle_presets.configure(text="▶ 列表")
         self._mode_label.configure(text="自由发送")
+        self._preset_toolbar.pack_forget()
+        self._send_opts.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        try:
+            self._send_opts.reflow()
+        except tk.TclError:
+            pass
 
     def _show_presets(self):
         self._send_frame.pack_forget()
@@ -441,6 +468,8 @@ class SerialAssistant(ttk.PanedWindow):
         self.presets_visible = True
         self.btn_toggle_presets.configure(text="▼ 自由")
         self._mode_label.configure(text="列表发送")
+        self._send_opts.pack_forget()
+        self._preset_toolbar.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
     def apply_recv_send_split(self, recv_ratio: Optional[float] = None) -> bool:
         """按比例设置收发区分割条（接收区在上、发送区在下）。"""
@@ -470,12 +499,12 @@ class SerialAssistant(ttk.PanedWindow):
             return None
 
     def get_action_block_min_height(self) -> int:
-        """下方 action 区最小高度（发送框 + 格式行 + 切换栏）。"""
+        """下方 action 区最小高度（切换栏含操作条 + 发送框）。"""
         try:
             self.update_idletasks()
             lines = max(int(self.send_text.cget("height")), 1)
             line_h = max(self.send_text.winfo_reqheight() // lines, 16)
-            min_body = line_h * lines + 28
+            min_body = line_h * lines + 8
             return self._toggle_row.winfo_reqheight() + min_body + 4
         except tk.TclError:
             return 160
@@ -543,20 +572,9 @@ class SerialAssistant(ttk.PanedWindow):
 
     def _populate_presets_inner(self):
         self._ensure_preset_styles()
-        toolbar = ttk.Frame(self.presets_container)
-        toolbar.pack(fill=tk.X, padx=0, pady=(0, 1))
-        for text, cmd in (
-            ("添加", self._on_add_preset),
-            ("编辑", self._on_edit_preset),
-            ("删除", self._on_del_preset),
-            ("清空", self._on_clear_presets),
-        ):
-            ttk.Button(
-                toolbar, text=text, command=cmd, style="Preset.TButton",
-            ).pack(side=tk.LEFT, padx=(0, 2))
-
+        # 操作条已在切换栏「列表」右侧；此处只放列表内容
         list_frame = ttk.Frame(self.presets_container)
-        list_frame.pack(fill=tk.BOTH, expand=True, padx=0, pady=0)
+        list_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=0, pady=0)
 
         canvas = tk.Canvas(list_frame, highlightthickness=0)
         sb = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=canvas.yview)
