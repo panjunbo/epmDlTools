@@ -80,6 +80,10 @@ class FlashloadProtocol:
         self.erase_32k_num = 0
         self.erase_4k_num = 0
         self.erase_mode = EraseMode.NONE
+        # 擦除进度：总数在 _prepare_erase 时固定，已完成数递增（只用于日志）
+        self.erase_total = 0
+        self.erase_done = 0
+        self._erase_logged_pct = 0
 
         self.load_addr = 0
         self.load_sent = 0
@@ -236,10 +240,21 @@ class FlashloadProtocol:
             self.logger.error("erase addr 必须 4K 对齐")
             return False
 
+        # size 向上对齐到 4K：擦除的最小单位是 4K 扇区，剩下的零头也补一次
+        # 4K 擦除（不报错、不丢字节）。
+        size = ((size + SizeVal.SIZE_4K.value - 1)
+                // SizeVal.SIZE_4K.value) * SizeVal.SIZE_4K.value
+        # 回写，保证 _erase_done 的结束地址跟实际擦除范围一致
+        if self.cmd == "erase":
+            self.erase_size = size
+        else:
+            self.erase_load_size = size
+
         self.erase_inc_addr = base
         head = base % SizeVal.SIZE_32K.value
         aligned_size = size
         if head != 0:
+            # 起始地址不在 32K 边界：先用 4K 扇区补到下一个 32K 边界
             head_size = min(SizeVal.SIZE_32K.value - head, size)
             self.erase_4k_head_num = head_size // SizeVal.SIZE_4K.value
             aligned_size -= head_size
@@ -247,13 +262,13 @@ class FlashloadProtocol:
             self.erase_4k_head_num = 0
         self.erase_32k_num = aligned_size // SizeVal.SIZE_32K.value if aligned_size > 0 else 0
         remain = aligned_size % SizeVal.SIZE_32K.value if aligned_size > 0 else 0
-        if remain > 0 and remain % SizeVal.SIZE_4K.value == 0:
-            self.erase_4k_num = remain // SizeVal.SIZE_4K.value
-        elif remain > 0:
-            self.logger.error("erase size 不是 4K 对齐")
-            return False
-        else:
-            self.erase_4k_num = 0
+        # size 已对齐到 4K，remain 必然是 4K 的倍数：剩下的按 4K 扇区擦
+        self.erase_4k_num = remain // SizeVal.SIZE_4K.value
+        # 擦除块总数固定下来（日志进度用，不能随计数器自减而变化）
+        self.erase_total = (self.erase_4k_head_num + self.erase_32k_num +
+                            self.erase_4k_num)
+        self.erase_done = 0
+        self._erase_logged_pct = 0
         return True
 
     def _erase_done(self) -> bool:
@@ -268,33 +283,44 @@ class FlashloadProtocol:
 
     def _step_erase(self) -> bool:
         if self.erase_4k_head_num > 0:
-            self._send_erase(self.erase_inc_addr, EraseMode.MODE_4K)
-            self.erase_4k_head_num -= 1
-            self.erase_inc_addr += SizeVal.SIZE_4K.value
+            mode, step = EraseMode.MODE_4K, SizeVal.SIZE_4K.value
         elif self.erase_32k_num > 0:
-            self._send_erase(self.erase_inc_addr, EraseMode.MODE_32K)
-            self.erase_32k_num -= 1
-            self.erase_inc_addr += SizeVal.SIZE_32K.value
+            mode, step = EraseMode.MODE_32K, SizeVal.SIZE_32K.value
         elif self.erase_4k_num > 0:
-            self._send_erase(self.erase_inc_addr, EraseMode.MODE_4K)
-            self.erase_4k_num -= 1
-            self.erase_inc_addr += SizeVal.SIZE_4K.value
+            mode, step = EraseMode.MODE_4K, SizeVal.SIZE_4K.value
         else:
-            self.logger.info("erase ok")
+            self.logger.info("erase ok（无更多擦除块）")
             return False
+        # 本次擦除的地址：发送的是 cur，自增后的 erase_inc_addr 是"下一块"
+        cur = self.erase_inc_addr
+        self._send_erase(cur, mode)
+        if mode == EraseMode.MODE_4K:
+            if self.erase_4k_head_num > 0:
+                self.erase_4k_head_num -= 1
+            else:
+                self.erase_4k_num -= 1
+        else:
+            self.erase_32k_num -= 1
+        self.erase_inc_addr = cur + step
+        self.erase_done += 1
         # 不每擦一个块都 log，避免 worker thread → Tk main thread 的
         # self.after() + Text widget 更新开销。改为：每 10% 进度打一次。
-        total_erases = (self.erase_4k_head_num + self.erase_32k_num +
-                        self.erase_4k_num + 1)
-        done_erases = total_erases - (self.erase_4k_head_num +
-                                      self.erase_32k_num + self.erase_4k_num)
-        if done_erases == 1 or done_erases * 10 // total_erases > (done_erases - 1) * 10 // total_erases:
+        total = self.erase_total
+        pct = (self.erase_done * 10 // total) if total else 10
+        if (self.erase_done == 1 or pct > self._erase_logged_pct
+                or self.erase_done >= total):
+            self._erase_logged_pct = pct
             self.logger.info(
-                f"send erase-alen:0x{self.erase_inc_addr:x} ({done_erases}/{total_erases})")
+                f"send erase-alen:0x{cur:x} ({self.erase_done}/{total})")
         return True
 
     def _prepare_load(self) -> bool:
         if not self.bin_parse.parse(self.flashload_bin_path):
+            return False
+        if len(self.bin_parse) == 0:
+            # 空文件：没有数据可发，直接报错退出。
+            # 不报错的话状态机会空等 PAGE_PROGRAM 的 ACK，直到空闲超时（30s）
+            self.logger.error(f"bin 文件为空: {self.flashload_bin_path}")
             return False
         self.load_addr = self.erase_load_addr
         self.load_sent = 0
@@ -386,7 +412,10 @@ class FlashloadProtocol:
                 return 1
             if self.cmd == "erase_load":
                 self.state = self.STATE_LOAD
-                self._send_load_packet()
+                if self._send_load_packet() is False:
+                    # 没有数据可发（空 bin）：直接结束，不要空等 ACK
+                    self.logger.info("erase_load finish")
+                    return 0
             else:
                 self._send_crypt_cfg()
                 self.state = self.STATE_LOAD

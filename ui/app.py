@@ -113,33 +113,89 @@ def _drop_log_prefix(
 
 # 每芯片下载规格 — 对应 download_tools_9062.bat / download_tools_9032.bat 的命令序列
 # mode:        programmer | flashload
-# size:        flashload erase_load_size（bat 中按 bin 区分）
 # sync_exit:   仅 DSP 烧录需要
 # baud_phase:  initial=使用 download_baud 起步；target=使用 config [flashload].target_baud
 # 注：addr 不在此处；统一从 [chip_xxx] 段读 ini 配置（用户可覆盖）
+# 注：擦除范围由 bin 文件大小决定（向上对齐 4K），不再有固定窗口
 # 注：target_baud 在 bootloader 阶段用于设备端切换波特率
 DOWNLOAD_SPEC: dict = {
     "9032": {
         # 9032 bat 在 programmer 之后立即切到 target_baud：
         # bootloader 阶段（首个 flashload）由 BAUD_CHANGE 切换，之后阶段直接用目标波特率
         "programmer":  {"mode": "programmer", "baud_phase": "initial"},
-        "bootloader":  {"mode": "flashload",  "size": 0x8000,  "baud_phase": "initial"},
-        "mcu_a":       {"mode": "flashload",  "size": 0xe0000, "baud_phase": "target"},
-        "mcu_b":       {"mode": "flashload",  "size": 0x80000, "baud_phase": "target"},
+        "bootloader":  {"mode": "flashload",  "baud_phase": "initial"},
+        "mcu_a":       {"mode": "flashload",  "baud_phase": "target"},
+        "mcu_b":       {"mode": "flashload",  "baud_phase": "target"},
         # 9032 无 C 核：ini 默认不带 mcu_c，但保留规格以支持用户手动选择文件
-        "mcu_c":       {"mode": "flashload",  "size": 0x80000, "baud_phase": "target", "sync_exit": True},
+        "mcu_c":       {"mode": "flashload",  "baud_phase": "target", "sync_exit": True},
         "_reset":      {"rdelay": 2},
     },
     "9062": {
         # 9062 bat 在 bootloader 之后才切到 target_baud
         "programmer":  {"mode": "programmer", "baud_phase": "initial"},
-        "bootloader":  {"mode": "flashload",  "size": 0x8000,  "baud_phase": "initial"},
-        "mcu_a":       {"mode": "flashload",  "size": 0xe0000, "baud_phase": "target"},
-        "mcu_b":       {"mode": "flashload",  "size": 0x80000, "baud_phase": "target"},
-        "mcu_c":       {"mode": "flashload",  "size": 0x80000, "baud_phase": "target", "sync_exit": True},
+        "bootloader":  {"mode": "flashload",  "baud_phase": "initial"},
+        "mcu_a":       {"mode": "flashload",  "baud_phase": "target"},
+        "mcu_b":       {"mode": "flashload",  "baud_phase": "target"},
+        "mcu_c":       {"mode": "flashload",  "baud_phase": "target", "sync_exit": True},
         "_reset":      {"rdelay": 2},
     },
 }
+
+# 擦除的最小单位：4K（flash 支持 4K/32K 块擦除）
+ERASE_ALIGN = 0x1000
+
+
+def align_up_4k(size: int) -> int:
+    """向上对齐到 4K。0 或负数返回 0。"""
+    if size <= 0:
+        return 0
+    return (size + ERASE_ALIGN - 1) & ~(ERASE_ALIGN - 1)
+
+
+def plan_flash_regions(chip: str, selected_bins: List[dict]) -> List[dict]:
+    """各 flashload 阶段实际会擦除/写入的区间 [addr, addr+align4k(size))。
+
+    擦除范围由 bin 文件大小决定（向上对齐 4K）：写多大就擦多大。
+    programmer 烧到 SRAM，不占 flash 区间。
+    """
+    spec = DOWNLOAD_SPEC.get(chip, {})
+    regions = []
+    for b in selected_bins:
+        key = b.get("key")
+        bin_spec = spec.get(key, {})
+        mode = b.get("mode") or bin_spec.get("mode", "flashload")
+        if mode == "programmer":
+            continue
+        path = b.get("path", "")
+        try:
+            size = os.path.getsize(path)
+        except OSError:
+            size = 0
+        addr = int(b.get("addr", 0) or 0)
+        erase_size = align_up_4k(size)
+        regions.append({
+            "key": key,
+            "label": b.get("label", key),
+            "path": path,
+            "addr": addr,
+            "size": size,
+            "erase_size": erase_size,
+            "end": addr + erase_size,
+        })
+    return regions
+
+
+def find_region_overlaps(regions: List[dict]) -> List[tuple]:
+    """两两区间重叠的组合 [(a, b, 重叠起点, 重叠终点), ...]。"""
+    out = []
+    for i in range(len(regions)):
+        for j in range(i + 1, len(regions)):
+            a, b = regions[i], regions[j]
+            lo = max(a["addr"], b["addr"])
+            hi = min(a["end"], b["end"])
+            if hi > lo:
+                out.append((a, b, lo, hi))
+    return out
 
 
 def _is_no_file_association(exc: BaseException) -> bool:
@@ -1251,6 +1307,8 @@ class EpmDlApp(tk.Tk):
         has_programmer = any(b["key"] == "programmer" for b in params["selected_bins"])
         if not has_programmer:
             self.logger.warn("未勾选 prog，跳过 programmer 阶段，进入调试下载")
+        # 擦除区间按各 bin 的大小算：区间重叠 = 后写的覆盖先写的 → 提前提示
+        self._warn_region_overlap(chip, params["selected_bins"])
         # 启动新一轮下载：清掉旧的 cancel 状态
         self._cancel_requested = False
         if self._serial_manager is not None and self._serial_manager.download_serial is not None:
@@ -1287,6 +1345,28 @@ class EpmDlApp(tk.Tk):
             args=(mgr, params, spec, was_log_open), daemon=True,
         )
         self._worker.start()
+
+    def _warn_region_overlap(self, chip: str, selected_bins: List[dict]):
+        """各 bin 的擦除/写入区间若互相重叠，提示后写的会覆盖先写的。"""
+        regions = plan_flash_regions(chip, selected_bins)
+        overlaps = find_region_overlaps(regions)
+        if not overlaps:
+            return
+        lines = []
+        for a, b, lo, hi in overlaps:
+            lines.append(
+                f"{a['label']} [0x{a['addr']:08x}, 0x{a['end']:08x}) 与 "
+                f"{b['label']} [0x{b['addr']:08x}, 0x{b['end']:08x}) "
+                f"重叠 0x{hi - lo:x} @ 0x{lo:08x}")
+        for line in lines:
+            self.logger.warn(f"擦除区间重叠: {line}")
+        messagebox.showwarning(
+            "擦除区间重叠",
+            "以下 bin 的擦除/写入区间互相重叠，后写的会覆盖先写的：\n\n"
+            + "\n".join(lines)
+            + "\n\n请检查 config.ini 里 [chip_xxx] 的地址，或换一个更小的 bin。",
+            parent=self,
+        )
 
     def _set_running(self, running: bool, serial_opened: bool = False):
         """下载/擦除/回读任务进行状态：同时控制 下载面板 / 擦除回读面板 / 串口面板 的灰化。
@@ -1509,7 +1589,17 @@ class EpmDlApp(tk.Tk):
                         f"{os.path.basename(bin_path)} -> 0x{addr:08x} ===")
                     ok = self._run_programmer(mgr, bin_path, addr)
                 else:
-                    size = bin_spec.get("size", 0x80000)
+                    # 擦除范围由 bin 大小决定：向上对齐 4K，写多大擦多大
+                    try:
+                        file_size = os.path.getsize(bin_path)
+                    except OSError:
+                        file_size = 0
+                    if file_size == 0:
+                        self.logger.error(
+                            f"[{bin_info['label']}] bin 为空文件: {bin_path}，跳过该阶段")
+                        all_ok = False
+                        continue
+                    size = align_up_4k(file_size)
                     sync_exit = bool(bin_spec.get("sync_exit", False))
                     if want_reset and key == last_flashload:
                         sync_exit = True
@@ -1538,7 +1628,8 @@ class EpmDlApp(tk.Tk):
                     self.logger.info(
                         f"=== [{bin_info['label']}] flashload 烧录: "
                         f"{os.path.basename(bin_path)} -> 0x{addr:08x}, "
-                        f"size=0x{size:x}, sync_exit={sync_exit}, "
+                        f"file=0x{file_size:x}, erase=0x{size:x} "
+                        f"[0x{addr:08x}, 0x{addr + size:08x}), sync_exit={sync_exit}, "
                         f"pc_baud={mgr._download_baud}, target_baud={target_baud_for_cmd} ===")
                     ok = self._run_flashload(mgr, bin_path, addr, size, sync_exit,
                                               target_baud=target_baud_for_cmd)
@@ -1626,8 +1717,9 @@ class EpmDlApp(tk.Tk):
         return rc
 
     def _run_flashload(self, mgr: "SerialManager", bin_path: str, addr: int,
-                       size: int = 0x80000, sync_exit: bool = False,
+                       size: int = 0, sync_exit: bool = False,
                        target_baud: int = 0) -> int:
+        """size = 擦除大小（调用方按 bin 文件大小向上对齐 4K 算出）。"""
         from commands import FlashloadCommand
 
         cfg = dict(self.cm.read())

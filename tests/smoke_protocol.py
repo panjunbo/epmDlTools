@@ -138,6 +138,37 @@ def drive_erase_load():
     print("  PASS")
 
 
+def drive_erase_load_empty_bin():
+    """空 bin：擦完立刻报错退出，不发 PAGE_PROGRAM，也不空等 ACK。"""
+    comm = MockComm()
+    comm.open()
+    bp = FakeBP(b"")
+    logger = make_default_logger()
+    cfg = {
+        "cmd": "erase_load",
+        "comm_type": "uart",
+        "flash_port_num": 0,
+        "erase_load_addr": 0x100000,
+        "erase_load_size": 0x1000,
+        "flashload_bin_path": "/tmp/empty.bin",
+        "src_crc_init": 0x1234, "src_crc_poly": 0x3d65,
+        "src_crc_len": 2, "src_crc_ref_in": 0, "src_crc_ref_out": 1,
+        "src_crc_xor_out": 0xffff,
+        "target_baud": 0,
+    }
+    proto = FlashloadProtocol(comm, bp, cfg, logger)
+    proto.start()
+    comm.push_rx(make_rx_frame(MsgIdFlashload.FLASH_SELECT.value, b"\x01"))
+    proto.tick()
+    comm.push_rx(make_rx_frame(MsgIdFlashload.SECTOR_ERASE_4K.value, b"\x01"))
+    code = proto.tick()
+    print(f"  erase_load(empty) exit code = {code}")
+    assert code == 1, f"空 bin 应立即失败, 实际 {code}"
+    sent = [t[8] for t in comm.tx_log]
+    assert MsgIdFlashload.PAGE_PROGRAM.value not in sent, "空 bin 不应发 PAGE_PROGRAM"
+    print("  PASS")
+
+
 def drive_erase_all():
     comm = MockComm()
     comm.open()
@@ -307,6 +338,8 @@ if __name__ == "__main__":
     drive_erase()
     print("--- drive_erase_load ---")
     drive_erase_load()
+    print("--- drive_erase_load_empty_bin ---")
+    drive_erase_load_empty_bin()
     print("--- drive_erase_all ---")
     drive_erase_all()
     print("--- drive_flash_read_single ---")

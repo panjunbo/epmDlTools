@@ -557,7 +557,6 @@ class DownloadPanel(ttk.LabelFrame):
 
     def _refresh_bin_row(self, key: str, keyword_empty: bool = False):
         """刷新单个 bin 行的显示。"""
-        bin_dir = self.bin_dir.get()
         info = self._chip_files.get(key)
         if keyword_empty or not self._resolved.get(key):
             self._file_labels[key].configure(text="(未配置)", foreground=self._COLOR_MUTED)
@@ -567,19 +566,18 @@ class DownloadPanel(ttk.LabelFrame):
         fname = self._resolved[key]
         is_manual = bool(self._manual_selection.get(key) and self._paths.get(key))
         # 文件存在性：手动选择用绝对路径，否则 bin_dir/fname
-        if is_manual:
-            full = self._paths[key]
-            exists = os.path.isfile(full)
-        else:
-            full = os.path.join(bin_dir, fname) if bin_dir else fname
-            exists = os.path.isfile(full)
+        full = self._full_path(key)
+        exists = os.path.isfile(full)
         addr = info.get("addr", 0) if info else 0
         fg = self._COLOR_MANUAL if is_manual else self._COLOR_AUTO
         if exists:
+            file_size = os.path.getsize(full)
             self._file_labels[key].configure(
                 text=f"{fname}  →  0x{addr:08x}", foreground=fg)
+            # 状态列带上文件大小：擦除范围 = 文件大小向上对齐 4K
             status = "✓ 手动" if is_manual else "✓ 自动"
-            self._status_labels[key].configure(text=status, foreground=self._COLOR_OK)
+            self._status_labels[key].configure(
+                text=f"{status} 0x{file_size:x}", foreground=self._COLOR_OK)
         else:
             self._file_labels[key].configure(
                 text=f"{fname}  (不存在)", foreground=self._COLOR_ERR)
@@ -587,15 +585,18 @@ class DownloadPanel(ttk.LabelFrame):
         # ini 里记的是勾选意图；文件不存在时不能勾上
         self._check_vars[key].set(bool(self._bin_selected.get(key)) and exists)
 
+    def _full_path(self, key: str) -> str:
+        """该 key 当前生效的 bin 路径（手动选择的绝对路径优先）。"""
+        if self._manual_selection.get(key) and self._paths.get(key):
+            return self._paths[key]
+        fname = self._resolved.get(key) or ""
+        bin_dir = self.bin_dir.get()
+        return os.path.join(bin_dir, fname) if bin_dir else fname
+
     def _bin_file_exists(self, key: str) -> bool:
         if not self._resolved.get(key):
             return False
-        bin_dir = self.bin_dir.get()
-        if self._manual_selection.get(key) and self._paths.get(key):
-            return os.path.isfile(self._paths[key])
-        fname = self._resolved[key]
-        full = os.path.join(bin_dir, fname) if bin_dir else fname
-        return os.path.isfile(full)
+        return os.path.isfile(self._full_path(key))
 
     def _refresh_id_log(self, key: str, bin_dir: Optional[str],
                          id_log_name: Optional[str] = None):
@@ -645,10 +646,7 @@ class DownloadPanel(ttk.LabelFrame):
             if not fname:
                 continue
             # bin：手动选择用绝对路径，否则 bin_dir/fname
-            if self._manual_selection.get(key) and self._paths.get(key):
-                full = self._paths[key]
-            else:
-                full = os.path.join(bin_dir, fname) if bin_dir else fname
+            full = self._full_path(key)
             # id_log：手动选择用绝对路径，否则保持原文件名（app.py 端拼 bin_dir）
             id_log_name = info.get("id_log")
             id_log_path = None
