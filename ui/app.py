@@ -278,6 +278,20 @@ def initial_h_sash(total: int, right_need: int, left_need: int) -> int:
     return max(0, min(left_need, total - 80))
 
 
+def h_sash_for_ratio(total: int, ratio: float) -> int:
+    """按用户拖出来的比例算分隔条位置。
+
+    不设"合法区间"：用户拖到哪就是哪，缩放/重启都按同一个比例摆回去。
+    之前在这里按右栏自身需要的宽度夹紧，会把用户拖好的比例顶掉 —— 下次
+    缩放分隔条就弹回默认位置（存的比例和屏幕上的位置对不上，来回跳）。
+
+    左栏窄了工具栏会折行、右栏窄了控件会被裁，都是用户自己选的。
+    """
+    if total <= 0:
+        return 0
+    return max(0, min(int(total * ratio), total))
+
+
 class EpmDlApp(tk.Tk):
     # 窗口尺寸下限（会被右栏内容的实际需要抬高，见 _apply_scaled_minsize）
     MIN_WIDTH = 640
@@ -551,16 +565,8 @@ class EpmDlApp(tk.Tk):
             total = self.hpaned.winfo_width()
             if total <= 200:
                 return
-            right_need = self._right_frame.winfo_reqwidth() + scale_px(self, 8)
-            left_need = scale_px(self, 200)
-            try:
-                # FlowFrame 用 place 摆子控件，reqwidth 不代表内容宽度，
-                # 由工具栏自己给出不折行时的宽度
-                left_need = self.assistant.toolbar_width_hint() + scale_px(self, 8)
-            except Exception:
-                pass
             # 仅当 ini 里显式写过比例时恢复；不要用 ensure_defaults 的占位值
-            # 覆盖用户拖拽结果。恢复时只用软下限，避免 right_need 把窄配置区撑回去。
+            # 覆盖用户拖拽结果。
             ratio = None
             if self.cm.has_option("ui", "hpaned_sash_ratio"):
                 raw = self.cm.get("ui", "hpaned_sash_ratio", "")
@@ -569,15 +575,20 @@ class EpmDlApp(tk.Tk):
                 except (TypeError, ValueError):
                     ratio = None
             if ratio is not None:
-                ratio = max(0.2, min(ratio, 0.85))
-                left_min = scale_px(self, 200)
-                right_min = scale_px(self, 280)
-                pos = max(left_min, min(int(total * ratio), total - right_min))
-                # 右侧控件放不下时按实际需要给宽度：比例只是偏好，
-                # 挤不下时右栏的按钮会被挤出屏幕（125% 布局下更明显）
-                if total - pos < right_need:
-                    pos = max(left_min, total - right_need)
+                ratio = max(0.0, min(ratio, 1.0))
+                # 按用户存的比例原样摆回去：ini 里存的比例和屏幕上的位置必须
+                # 一致，否则下次缩放分隔条会"弹回"默认位置。
+                pos = h_sash_for_ratio(total, ratio)
             else:
+                # 第一次用（ini 里没存过比例）：给个默认位置
+                right_need = self._right_frame.winfo_reqwidth() + scale_px(self, 8)
+                left_need = scale_px(self, 200)
+                try:
+                    # FlowFrame 用 place 摆子控件，reqwidth 不代表内容宽度，
+                    # 由工具栏自己给出不折行时的宽度
+                    left_need = self.assistant.toolbar_width_hint() + scale_px(self, 8)
+                except Exception:
+                    pass
                 pos = initial_h_sash(total, right_need, left_need)
             self.hpaned.sashpos(0, pos)
             self._hpaned_ratio = pos / float(total)
@@ -596,31 +607,25 @@ class EpmDlApp(tk.Tk):
             pass
 
     def _on_hpaned_resize(self, event=None):
-        """窗口尺寸变化后按用户设的比例重摆分隔条，并保证右栏不被压到装不下。
+        """窗口尺寸变化后按用户设的比例重摆分隔条。
 
         ttk.PanedWindow 在窗口变大时把多出来的宽度按 weight(3:2) 分给两栏，
         所以最大化、或者从别的显示器拖回来（会先还原再最大化）之后，用户
         拖窄的那一栏会被撑开，看上去就像分隔条“恢复默认值”。这里记住比例，
         尺寸一变就按比例摆回去。
 
-        同 VS Code 的侧栏最小宽度 —— 拖不到比最小宽度更窄，右栏的按钮
-        才不会被裁掉。
+        比例是用户拖出来的，原样摆回去，不再按右栏需要的宽度夹紧 —— 夹紧
+        会顶掉用户的选择，下次缩放分隔条又弹回默认位置。
         """
         try:
             total = self.hpaned.winfo_width()
             if total <= 200:
                 return
-            left_min = scale_px(self, 200)
-            pos = self.hpaned.sashpos(0)
-            if self._hpaned_ratio is not None:
-                target = int(total * self._hpaned_ratio)
-                target = max(left_min, min(target, total - left_min))
-                if abs(target - pos) > 1:
-                    self.hpaned.sashpos(0, target)
-                    pos = target
-            right_need = self._right_frame.winfo_reqwidth() + scale_px(self, 8)
-            if total - pos < right_need:
-                self.hpaned.sashpos(0, max(left_min, total - right_need))
+            if self._hpaned_ratio is None:
+                return
+            target = h_sash_for_ratio(total, self._hpaned_ratio)
+            if abs(target - self.hpaned.sashpos(0)) > 1:
+                self.hpaned.sashpos(0, target)
         except tk.TclError:
             pass
 
@@ -767,7 +772,9 @@ class EpmDlApp(tk.Tk):
             "ui", "recv_font_size",
             str(self.assistant.get_recv_font_size()),
         )
-        sash_ratio = self._get_hpaned_sash_ratio()
+        sash_ratio = self._hpaned_ratio
+        if sash_ratio is None:
+            sash_ratio = self._get_hpaned_sash_ratio()
         if sash_ratio is not None:
             self.cm.set("ui", "hpaned_sash_ratio", f"{sash_ratio:.4f}")
         recv_ratio = self.assistant.get_recv_send_ratio()
@@ -1517,11 +1524,7 @@ class EpmDlApp(tk.Tk):
             if h_ratio is not None:
                 self._hpaned_ratio = h_ratio
             if h_ratio is not None and total > 200:
-                right_need = (self._right_frame.winfo_reqwidth()
-                              + scale_px(self, 8))
-                left_min = scale_px(self, 200)
-                pos = max(left_min, min(int(total * h_ratio),
-                                        total - right_need))
+                pos = h_sash_for_ratio(total, h_ratio)
                 self.hpaned.sashpos(0, pos)
         except tk.TclError:
             pass
