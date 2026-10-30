@@ -1396,6 +1396,26 @@ class EpmDlApp(tk.Tk):
         # 取消按钮置灰，避免重复触发
         self.dl_panel.btn_dl.configure(state=tk.DISABLED, text="取消中...")
 
+    @staticmethod
+    def _bin_stamp(path: str) -> str:
+        """bin 的修改时间（'MM-DD HH:MM:SS'），取不到返回 '?'。
+
+        打进下载日志：出现"烧到旧版本"时，这条时间就是判断依据——
+        它是这次真正烧进去的那份产物的编译时间。
+        """
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            return "?"
+        return time.strftime("%m-%d %H:%M:%S", time.localtime(mtime))
+
+    @staticmethod
+    def _file_size(path: str) -> int:
+        try:
+            return os.path.getsize(path)
+        except OSError:
+            return 0
+
     def _start_download(self, params: dict):
         if self._worker is not None and self._worker.is_alive():
             self.logger.warn("已有任务在进行中")
@@ -1424,8 +1444,10 @@ class EpmDlApp(tk.Tk):
         was_log_open = self.serial_panel._opened
         # 打印当前每个 bin 的解析结果，便于排查 ini 配置问题
         for b in params["selected_bins"]:
+            path = b.get("path", "")
             self.logger.info(
-                f"  bin[{b['key']}]: file={os.path.basename(b.get('path',''))}, "
+                f"  bin[{b['key']}]: file={os.path.basename(path)}, "
+                f"mtime={self._bin_stamp(path)}, size=0x{self._file_size(path):x}, "
                 f"addr=0x{b.get('addr',0):08x}, label={b.get('label','')}")
         mgr = self._ensure_manager()
         sp = self.serial_panel

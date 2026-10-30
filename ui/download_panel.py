@@ -215,6 +215,53 @@ class DownloadPanel(ttk.LabelFrame):
     def enable_refresh(self):
         self._refresh_enabled = True
 
+    def _rescan_files(self) -> dict:
+        """重扫 bin 目录，返回 {key: (旧文件名, 新文件名)}。
+
+        只统计自动识别的行：手动选的文件不走目录自动匹配。
+        """
+        before = dict(self._resolved)
+        self.refresh_bins()
+        changed = {}
+        for key in self.BINARY_KEYS:
+            if self._manual_selection.get(key):
+                continue
+            old, new = before.get(key), self._resolved.get(key)
+            if old != new:
+                changed[key] = (old, new)
+        return changed
+
+    def _warn_stale_manual_selection(self):
+        """手动选的文件比目录里同关键词更新的文件还旧 → 提醒可能烧错版本。"""
+        bin_dir = self.bin_dir.get()
+        if not bin_dir or not os.path.isdir(bin_dir):
+            return
+        for key in self.BINARY_KEYS:
+            if not self._manual_selection.get(key):
+                continue
+            path = self._paths.get(key)
+            if not path:
+                continue
+            info = self._chip_files.get(key)
+            keyword = info.get("keyword", "") if info else ""
+            if not keyword:
+                continue
+            newest = self._find_bin_file(bin_dir, keyword, self.chip_type.get())
+            if not newest:
+                continue
+            newest_path = os.path.join(bin_dir, newest)
+            if os.path.abspath(newest_path) == os.path.abspath(path):
+                continue
+            mine = self._file_mtime(path)
+            theirs = self._file_mtime(newest_path)
+            if mine is None or theirs is None or theirs <= mine:
+                continue
+            self.append_status(
+                f"⚠ {self.display_key(key)} 手动选的文件比目录里更新的 "
+                f"{newest} 还旧，确认是否烧错版本",
+                "WARN",
+            )
+
     def _apply_reset_rdelay_state(self):
         """rdelay 编辑框跟随 reset 选择框：勾选可编辑，取消置灰。"""
         self.entry_rdelay.configure(
@@ -411,13 +458,17 @@ class DownloadPanel(ttk.LabelFrame):
     def _find_bin_file(
         self, bin_dir: str, keyword: str, chip: Optional[str] = None,
     ) -> Optional[str]:
-        """在目录内按关键词匹配 bin 文件（区分大小写），优先前缀与当前 chip 匹配。"""
+        """在目录内按关键词匹配 bin 文件（区分大小写），优先前缀与当前 chip 匹配。
+
+        同分时取修改时间更新的那个：目录里同时留着新旧两个版本时，
+        不能靠 listdir 顺序碰运气（碰上哪个算哪个，就会烧到旧版本）。
+        """
         if not keyword or not bin_dir or not os.path.isdir(bin_dir):
             return None
         chip = chip or self.chip_type.get()
         other_chips = [c for c in self._chip_types if c != chip]
         want_idlog = "idlog" in keyword.lower()
-        best, best_score = None, -999
+        best, best_key = None, (-999, -1.0)
         for name in os.listdir(bin_dir):
             if not name.lower().endswith(".bin"):
                 continue
@@ -432,9 +483,20 @@ class DownloadPanel(ttk.LabelFrame):
             for oc in other_chips:
                 if oc in name:
                     score -= 4
-            if score > best_score:
-                best, best_score = name, score
+            mtime = self._file_mtime(os.path.join(bin_dir, name))
+            # (匹配分, 修改时间)：分数高的优先，同分取更新的
+            key = (score, mtime if mtime is not None else -1.0)
+            if key > best_key:
+                best, best_key = name, key
         return best
+
+    @staticmethod
+    def _file_mtime(path: str) -> Optional[float]:
+        """文件修改时间；取不到时返回 None。"""
+        try:
+            return os.path.getmtime(path)
+        except OSError:
+            return None
 
     def _file_dialog_start(self, saved_path: str, fallback_name: str = "") -> tuple:
         """再次选择时打开上次文件所在目录；还没有手动选择时用下载路径。"""
@@ -739,6 +801,16 @@ class DownloadPanel(ttk.LabelFrame):
     def _do_download(self):
         if self._on_download is None:
             return
+        # 下载前再扫一次目录：编译可能发生在界面上次扫描之后，
+        # 不重扫就会照着旧的文件名烧旧版本
+        changed = self._rescan_files()
+        for key, (old, new) in changed.items():
+            self.append_status(
+                f"下载前重扫：{self.display_key(key)} 由 {old or '(无)'} "
+                f"改为 {new or '(无)'}",
+                "WARN",
+            )
+        self._warn_stale_manual_selection()
         self._on_download(self.collect())
 
     def set_running(self, running: bool, serial_opened: bool = False):

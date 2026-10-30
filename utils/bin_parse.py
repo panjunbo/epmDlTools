@@ -29,8 +29,17 @@ class BinParse:
 
     def parse(self, path: str) -> bool:
         try:
+            before = self._stat(path)
             with open(path, "rb") as fp:
-                self._buf[:] = fp.read()
+                data = fp.read()
+            after = self._stat(path)
+            # 读的过程中文件被改写（编译还没完，bin 正在被覆盖）：
+            # 读到的可能是半截内容，烧进设备等于砖机，必须挡住。
+            if before is not None and after is not None and before != after:
+                self._log_error(
+                    f"文件在读取过程中被修改，请等编译完成后再下载: {path}")
+                return False
+            self._buf[:] = data
             return True
         except FileNotFoundError:
             self._log_error(f"文件不存在: {path}")
@@ -38,6 +47,15 @@ class BinParse:
         except Exception as e:
             self._log_error(f"读取失败: {path} — {e}")
             return False
+
+    @staticmethod
+    def _stat(path: str):
+        """文件状态（大小 + 修改时间）；取不到返回 None。"""
+        try:
+            st = os.stat(path)
+        except OSError:
+            return None
+        return (st.st_size, st.st_mtime_ns)
 
     def save(self, data, sub_dir: str = "readback") -> str:
         if sub_dir == "readback":
