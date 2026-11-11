@@ -1051,11 +1051,14 @@ class EpmDlApp(tk.Tk):
         return ok
 
     def _close_serial(self):
-        self._flush_live_log_queue()
-        self.assistant.stop()
+        # 先停 RX，再刷 UI 队列：避免关口过程中队列边刷边涨、半截行延迟冒出来
         if self._serial_manager is not None:
             self._serial_manager.close_log()
         self._active_comm = None
+        self._flush_live_log_queue()
+        self.assistant.stop()
+        if hasattr(self, "_id_log_parser"):
+            self._id_log_parser.clear()
         self.logger.info("串口已关闭")
 
     def _cancel_live_log_drain(self):
@@ -2084,9 +2087,12 @@ class EpmDlApp(tk.Tk):
             self.cm.save()
         except Exception as e:
             print(f"[EpmDlApp] save config failed: {e}")
-        self._flush_live_log_queue()
-        self.assistant.stop()
         if self._serial_manager is not None:
             self._serial_manager.close_log()
+        self._active_comm = None
+        self._flush_live_log_queue()
+        self.assistant.stop()
+        if hasattr(self, "_id_log_parser"):
+            self._id_log_parser.clear()
         self._base_logger.close_id_file()
         self.destroy()
