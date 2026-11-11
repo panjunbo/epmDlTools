@@ -12,11 +12,19 @@ _FIND_HISTORY_SEP = "|"
 _LARGE_LOG_CHARS = 512 * 1024
 _TEXT_INSERT_LINES = 400
 _RECV_TEXT_MAX_CHARS = 512 * 1024
-_APPEND_BATCH = 32
+_APPEND_BATCH = 64
 _SAVE_FLUSH_LINES = 32
 _RECV_FONT_DEFAULT = 10
 _RECV_FONT_MIN = 8
 _RECV_FONT_MAX = 28
+# 滚动条底部「自动滚屏」按钮（覆盖系统下箭头；使能后天蓝底）
+_AUTO_SCROLL_BTN_SIZE = 17
+_AUTO_SCROLL_ON_BG = "#87CEEB"
+_AUTO_SCROLL_ON_FG = "#1a3a5c"
+_AUTO_SCROLL_ON_BORDER = "#5dade2"
+_AUTO_SCROLL_OFF_BG = "#f0f0f0"
+_AUTO_SCROLL_OFF_FG = "#606060"
+_AUTO_SCROLL_OFF_BORDER = "#adadad"
 
 from communication import UartComm
 from .flow import FlowFrame
@@ -65,6 +73,11 @@ class SerialAssistant(ttk.PanedWindow):
         self._find_bar_visible = False
         self._defer_scroll = False
         self._text_insert_gen = 0
+        # 发送区折叠：收起前记住 sash 比例，展开后还原
+        self.send_area_visible = tk.BooleanVar(value=True)
+        self._saved_recv_ratio: Optional[float] = None
+        self._send_area_visible_applied: Optional[bool] = None
+        self._send_area_callback: Optional[Callable[[bool], None]] = None
         fonts = get_ui_fonts()
         self._mono_font = fonts.mono_normal
         self._recv_font_size = _RECV_FONT_DEFAULT
@@ -76,6 +89,10 @@ class SerialAssistant(ttk.PanedWindow):
         self._recv_bytes = 0
         self._append_pending: List[tuple] = []
         self._save_pending_lines = 0
+        # 接收区字符数（避免 trim 时 get 全量文本卡 UI）
+        self._recv_char_count = 0
+        # drain/重放期间合并写入：禁止 _append 中途 flush
+        self._hold_append_flush = False
 
         self._recv_pane = ttk.Frame(self)
         self.add(self._recv_pane, weight=1)
@@ -214,9 +231,33 @@ class SerialAssistant(ttk.PanedWindow):
         )
         self.recv_text.grid(row=0, column=0, sticky=tk.NSEW)
 
-        sb_y = ttk.Scrollbar(text_frame, orient=tk.VERTICAL, command=self.recv_text.yview)
-        sb_y.grid(row=0, column=1, sticky=tk.NS)
-        self.recv_text.configure(yscrollcommand=sb_y.set)
+        # 右侧滚动条容器：按钮 place 盖住系统下箭头，避免「三角 + 按钮」叠两层
+        self._sb_wrap = ttk.Frame(text_frame)
+        self._sb_wrap.grid(row=0, column=1, sticky=tk.NS)
+
+        self._sb_y = ttk.Scrollbar(
+            self._sb_wrap, orient=tk.VERTICAL, command=self.recv_text.yview)
+        self._sb_y.pack(side=tk.TOP, fill=tk.Y, expand=True)
+        self.recv_text.configure(yscrollcommand=self._sb_y.set)
+
+        sz = _AUTO_SCROLL_BTN_SIZE
+        self._btn_auto_scroll = tk.Canvas(
+            self._sb_wrap,
+            width=sz,
+            height=sz,
+            highlightthickness=0,
+            bd=0,
+            cursor="hand2",
+            takefocus=0,
+        )
+        self._btn_auto_scroll.place(
+            relx=0.5, rely=1.0, anchor=tk.S, width=sz, height=sz)
+        # Canvas.lift 是抬图元；这里要用 Misc.lift 抬窗口，盖住滚动条下箭头
+        tk.Misc.lift(self._btn_auto_scroll)
+        self._btn_auto_scroll.bind("<Button-1>", self._on_auto_scroll_btn_click)
+        self._btn_auto_scroll.bind("<Configure>", lambda _e: self._sync_auto_scroll_btn())
+        self.auto_scroll.trace_add("write", self._sync_auto_scroll_btn)
+        self._sync_auto_scroll_btn()
 
         for tag, color in self.LEVEL_COLOR.items():
             self.recv_text.tag_configure(f"lv_{tag}", foreground=color)
@@ -224,6 +265,53 @@ class SerialAssistant(ttk.PanedWindow):
         self.recv_text.tag_configure("find_current", background="#ffb347")
 
         self._setup_recv_text_bindings()
+
+    def _on_auto_scroll_btn_click(self, _event=None):
+        """滚动条底部按钮：切换自动滚屏；开启时滚到末尾。"""
+        self.auto_scroll.set(not self.auto_scroll.get())
+        if self.auto_scroll.get():
+            try:
+                self.recv_text.see(tk.END)
+            except tk.TclError:
+                pass
+        return "break"
+
+    def _sync_auto_scroll_btn(self, *_args):
+        """根据 auto_scroll 状态重绘底部三角按钮（与工具栏勾选同步）。"""
+        canvas = getattr(self, "_btn_auto_scroll", None)
+        if canvas is None:
+            return
+        on = bool(self.auto_scroll.get())
+        bg = _AUTO_SCROLL_ON_BG if on else _AUTO_SCROLL_OFF_BG
+        fg = _AUTO_SCROLL_ON_FG if on else _AUTO_SCROLL_OFF_FG
+        border = _AUTO_SCROLL_ON_BORDER if on else _AUTO_SCROLL_OFF_BORDER
+        try:
+            canvas.configure(bg=bg)
+            canvas.delete("all")
+            w = max(int(canvas.winfo_width()), int(canvas.winfo_reqwidth()),
+                    _AUTO_SCROLL_BTN_SIZE)
+            h = max(int(canvas.winfo_height()), int(canvas.winfo_reqheight()),
+                    _AUTO_SCROLL_BTN_SIZE)
+            canvas.create_rectangle(
+                0, 0, w - 1, h - 1, outline=border, fill=bg,
+            )
+            # 向下三角（与最初方案一致）
+            pad_x = max(3, w // 4)
+            pad_y = max(4, h // 3)
+            canvas.create_polygon(
+                pad_x, pad_y,
+                w - 1 - pad_x, pad_y,
+                w // 2, h - 1 - pad_y,
+                fill=fg, outline=fg,
+            )
+        except tk.TclError:
+            pass
+
+    def _on_recv_click(self, _event):
+        """点击 log 显示区时关闭自动滚屏，便于翻看历史。"""
+        if self.auto_scroll.get():
+            self.auto_scroll.set(False)
+        return None
 
     def _setup_recv_text_bindings(self):
         """接收区只读：可选中/复制，禁止编辑；Ctrl+滚轮缩放字号。"""
@@ -233,6 +321,7 @@ class SerialAssistant(ttk.PanedWindow):
         self.recv_text.bind("<Control-f>", self._focus_find)
         self.recv_text.bind("<F3>", self._find_next_shortcut)
         self.recv_text.bind("<Shift-F3>", self._find_prev_shortcut)
+        self.recv_text.bind("<Button-1>", self._on_recv_click)
         self.recv_text.bind("<Button-3>", self._show_recv_context_menu)
         # Windows 上 Ctrl+滚轮常以 MouseWheel+Control 位投递；两套绑定都接住
         self.recv_text.bind("<MouseWheel>", self._on_recv_wheel)
@@ -403,7 +492,7 @@ class SerialAssistant(ttk.PanedWindow):
         self.action_content = ttk.Frame(self.action_area)
         self.action_content.pack(fill=tk.BOTH, expand=True, padx=0, pady=0)
 
-        # 切换栏：模式 | ▶列表 | [操作条占红框位] …… 流量
+        # 切换栏：模式 | ▶列表 | ▼隐藏 | [操作条] …… 流量
         self._toggle_row = ttk.Frame(self.action_content)
         self._toggle_row.pack(side=tk.TOP, fill=tk.X, padx=0, pady=0)
         self._mode_label = ttk.Label(self._toggle_row, text="自由发送", foreground="#268bd2")
@@ -412,6 +501,11 @@ class SerialAssistant(ttk.PanedWindow):
             self._toggle_row, text="▶ 列表", command=self._toggle_action_mode, width=7,
         )
         self.btn_toggle_presets.pack(side=tk.LEFT, padx=(0, 6))
+        self.btn_hide_send = ttk.Button(
+            self._toggle_row, text="▼ 隐藏",
+            command=self._toggle_send_area_visible, width=7,
+        )
+        self.btn_hide_send.pack(side=tk.LEFT, padx=(0, 6))
 
         self._traffic_stat_var = tk.StringVar(value="收0/0B 发0/0B")
         ttk.Label(
@@ -435,6 +529,7 @@ class SerialAssistant(ttk.PanedWindow):
         self._send_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True, after=self._toggle_row)
         self.presets_visible = False
         self._show_send()
+        self._send_area_visible_applied = True
 
         self._auto_thread: Optional[threading.Thread] = None
         self._auto_stop = threading.Event()
@@ -442,19 +537,115 @@ class SerialAssistant(ttk.PanedWindow):
         # 失败弹窗显示期间禁止重新拉起定时线程
         self._auto_block = False
         self.after(500, self._check_auto_send)
+        # 折叠态拖动分隔条时顶回窄条高度
+        self.bind("<ButtonRelease-1>", self._on_recv_send_sash_release, add="+")
+
+    def bind_send_area_visible_callback(self, cb: Optional[Callable[[bool], None]]):
+        """发送区显隐变化时回调（供菜单勾选同步）。"""
+        self._send_area_callback = cb
+
+    def is_send_area_visible(self) -> bool:
+        return bool(self.send_area_visible.get())
+
+    def _toggle_send_area_visible(self):
+        self.set_send_area_visible(not self.send_area_visible.get())
+
+    def set_send_area_visible(self, visible: bool):
+        """展开/折叠发送区；折叠时只留窄条（▶ 发送区 + 流量统计）。"""
+        visible = bool(visible)
+        if self._send_area_visible_applied is not None and (
+                self._send_area_visible_applied == visible):
+            self.send_area_visible.set(visible)
+            return
+        self.send_area_visible.set(visible)
+        if visible:
+            self._expand_send_area()
+        else:
+            self._collapse_send_area()
+        self._send_area_visible_applied = visible
+        cb = self._send_area_callback
+        if cb is not None:
+            try:
+                cb(visible)
+            except Exception:
+                pass
+
+    def _collapse_send_area(self):
+        """收起发送/列表内容，只留切换栏窄条。"""
+        ratio = None
+        try:
+            total = self.winfo_height()
+            if total >= 160:
+                ratio = self.sashpos(0) / float(total)
+        except tk.TclError:
+            ratio = None
+        if ratio is not None:
+            self._saved_recv_ratio = max(0.20, min(float(ratio), 0.85))
+        elif self._saved_recv_ratio is None:
+            self._saved_recv_ratio = self.DEFAULT_RECV_RATIO
+
+        self._send_frame.pack_forget()
+        self.presets_container.pack_forget()
+        self._mode_label.pack_forget()
+        self.btn_toggle_presets.pack_forget()
+        self._mode_ops.pack_forget()
+        self._send_opts.pack_forget()
+        self._preset_toolbar.pack_forget()
+        self.btn_hide_send.configure(text="▶ 发送区", width=8)
+        try:
+            self.btn_hide_send.pack(side=tk.LEFT, padx=(0, 6))
+        except tk.TclError:
+            pass
+        self.after_idle(self._apply_collapsed_sash)
+
+    def _expand_send_area(self):
+        """展开发送区，恢复折叠前 sash 比例与自由/列表模式。"""
+        self.btn_hide_send.configure(text="▼ 隐藏", width=7)
+        self.btn_hide_send.pack_forget()
+        self._mode_label.pack(side=tk.LEFT, padx=(0, 4))
+        self.btn_toggle_presets.pack(side=tk.LEFT, padx=(0, 6))
+        self.btn_hide_send.pack(side=tk.LEFT, padx=(0, 6))
+        self._mode_ops.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
+        if self.presets_visible:
+            self._show_presets()
+        else:
+            self._show_send()
+        ratio = self._saved_recv_ratio
+        self.after_idle(lambda r=ratio: self.apply_recv_send_split(r))
+
+    def _apply_collapsed_sash(self):
+        """折叠态：分隔条贴底，下方仅窄条高度。"""
+        try:
+            self.update_idletasks()
+            total = self.winfo_height()
+            if total < 80:
+                return
+            bar_h = max(int(self._toggle_row.winfo_reqheight()), 24) + 6
+            self.sashpos(0, max(40, total - bar_h))
+        except tk.TclError:
+            pass
+
+    def _on_recv_send_sash_release(self, _event=None):
+        if not self.send_area_visible.get():
+            self.after_idle(self._apply_collapsed_sash)
+
     def _toggle_action_mode(self):
+        if not self.send_area_visible.get():
+            return
         if self.presets_visible:
             self._show_send()
         else:
             self._show_presets()
 
     def _show_send(self):
-        self.presets_container.pack_forget()
-        self._send_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True, after=self._toggle_row)
         self.presets_visible = False
         self.btn_toggle_presets.configure(text="▶ 列表")
         self._mode_label.configure(text="自由发送")
         self._preset_toolbar.pack_forget()
+        if not self.send_area_visible.get():
+            return
+        self.presets_container.pack_forget()
+        self._send_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True, after=self._toggle_row)
         self._send_opts.pack(side=tk.LEFT, fill=tk.X, expand=True)
         try:
             self._send_opts.reflow()
@@ -462,19 +653,25 @@ class SerialAssistant(ttk.PanedWindow):
             pass
 
     def _show_presets(self):
-        self._send_frame.pack_forget()
-        self.presets_container.pack(
-            side=tk.TOP, fill=tk.BOTH, expand=True, after=self._toggle_row)
         self.presets_visible = True
         self.btn_toggle_presets.configure(text="▼ 自由")
         self._mode_label.configure(text="列表发送")
         self._send_opts.pack_forget()
+        if not self.send_area_visible.get():
+            return
+        self._send_frame.pack_forget()
+        self.presets_container.pack(
+            side=tk.TOP, fill=tk.BOTH, expand=True, after=self._toggle_row)
         self._preset_toolbar.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
     def apply_recv_send_split(self, recv_ratio: Optional[float] = None) -> bool:
         """按比例设置收发区分割条（接收区在上、发送区在下）。"""
         ratio = self.DEFAULT_RECV_RATIO if recv_ratio is None else recv_ratio
         ratio = max(0.20, min(float(ratio), 0.85))
+        if not self.send_area_visible.get():
+            self._saved_recv_ratio = ratio
+            self._apply_collapsed_sash()
+            return True
         try:
             self.update_idletasks()
             total = self.winfo_height()
@@ -489,7 +686,9 @@ class SerialAssistant(ttk.PanedWindow):
             return False
 
     def get_recv_send_ratio(self) -> Optional[float]:
-        """当前接收区高度占比；窗口过小时返回 None。"""
+        """当前接收区高度占比；折叠时返回收起前保存的比例。"""
+        if not self.send_area_visible.get():
+            return self._saved_recv_ratio
         try:
             total = self.winfo_height()
             if total < 160:
@@ -499,15 +698,17 @@ class SerialAssistant(ttk.PanedWindow):
             return None
 
     def get_action_block_min_height(self) -> int:
-        """下方 action 区最小高度（切换栏含操作条 + 发送框）。"""
+        """下方 action 区最小高度（折叠时仅切换栏）。"""
         try:
             self.update_idletasks()
+            if not self.send_area_visible.get():
+                return max(int(self._toggle_row.winfo_reqheight()), 24) + 6
             lines = max(int(self.send_text.cget("height")), 1)
             line_h = max(self.send_text.winfo_reqheight() // lines, 16)
             min_body = line_h * lines + 8
             return self._toggle_row.winfo_reqheight() + min_body + 4
         except tk.TclError:
-            return 160
+            return 32 if not self.send_area_visible.get() else 160
 
     def _ensure_preset_styles(self):
         """列表框和按键与下载路径框同一字号。"""
@@ -780,6 +981,7 @@ class SerialAssistant(ttk.PanedWindow):
         self._cancel_text_insert()
         self._append_pending.clear()
         self.recv_text.delete("1.0", tk.END)
+        self._recv_char_count = 0
         self._find_pos = "1.0"
         self._find_last_start = None
         self._find_last_end = None
@@ -792,6 +994,15 @@ class SerialAssistant(ttk.PanedWindow):
 
     def set_defer_scroll(self, defer: bool):
         self._defer_scroll = defer
+
+    def begin_append_batch(self):
+        """开始批量追加：中途不 flush，由 end_append_batch 一次写出。"""
+        self._hold_append_flush = True
+
+    def end_append_batch(self):
+        """结束批量追加并 flush。"""
+        self._hold_append_flush = False
+        self.flush_pending()
 
     def _cancel_text_insert(self):
         self._text_insert_gen += 1
@@ -835,6 +1046,7 @@ class SerialAssistant(ttk.PanedWindow):
             return
         try:
             self.recv_text.insert("1.0", content)
+            self._recv_char_count = len(content)
             if self.auto_scroll.get():
                 self.recv_text.see(tk.END)
         except tk.TclError:
@@ -854,8 +1066,10 @@ class SerialAssistant(ttk.PanedWindow):
         try:
             if start == 0:
                 self.recv_text.insert("1.0", block)
+                self._recv_char_count = len(block)
             else:
                 self.recv_text.insert(tk.END, block)
+                self._recv_char_count += len(block)
         except tk.TclError:
             pass
         if end < len(lines):
@@ -1492,26 +1706,45 @@ class SerialAssistant(ttk.PanedWindow):
 
     def _append(self, line: str, tag: str = "", save: bool = True):
         self._append_pending.append((line, tag, save))
-        if len(self._append_pending) >= _APPEND_BATCH:
+        if (not self._hold_append_flush
+                and len(self._append_pending) >= _APPEND_BATCH):
             self.flush_pending()
 
     def flush_pending(self):
-        """批量写入接收区；实时串口 drain / 重放 tick 结束时调用。"""
+        """批量写入接收区；实时串口 drain / 重放 tick 结束时调用。
+
+        同 tag 连续行合并成一次 insert，减少 Tk 调用次数。
+        """
         if not self._append_pending:
             return
         pending = self._append_pending
         self._append_pending = []
         save_lines: List[str] = []
+        inserted = 0
         try:
-            for line, tag, save in pending:
-                if not line.endswith("\n"):
-                    line = line + "\n"
+            i = 0
+            n = len(pending)
+            while i < n:
+                tag = pending[i][1]
+                parts: List[str] = []
+                while i < n and pending[i][1] == tag:
+                    line, _tag, save = pending[i]
+                    if not line.endswith("\n"):
+                        line = line + "\n"
+                    parts.append(line)
+                    if save:
+                        save_lines.append(line)
+                    i += 1
+                block = "".join(parts)
+                if not block:
+                    continue
                 if tag:
-                    self.recv_text.insert(tk.END, line, tag)
+                    self.recv_text.insert(tk.END, block, tag)
                 else:
-                    self.recv_text.insert(tk.END, line)
-                if save:
-                    save_lines.append(line)
+                    self.recv_text.insert(tk.END, block)
+                inserted += len(block)
+            if inserted:
+                self._recv_char_count += inserted
             self._trim_recv_text()
             if (self.auto_scroll.get() and not self._find_active
                     and not self._defer_scroll):
@@ -1529,15 +1762,15 @@ class SerialAssistant(ttk.PanedWindow):
                 pass
 
     def _trim_recv_text(self):
-        """接收区超过上限时删最旧内容，避免 Text 控件无限膨胀拖慢 UI。"""
+        """接收区超过上限时删最旧内容；用本地计数，避免 get 全量文本。"""
         try:
-            nchars = len(self.recv_text.get("1.0", "end-1c"))
-            if nchars <= _RECV_TEXT_MAX_CHARS:
+            if self._recv_char_count <= _RECV_TEXT_MAX_CHARS:
                 return
-            cut = nchars - int(_RECV_TEXT_MAX_CHARS * 0.875)
+            cut = self._recv_char_count - int(_RECV_TEXT_MAX_CHARS * 0.875)
             if cut <= 0:
                 return
             self.recv_text.delete("1.0", f"1.0+{cut}c")
+            self._recv_char_count = max(0, self._recv_char_count - cut)
         except tk.TclError:
             pass
 

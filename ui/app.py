@@ -40,8 +40,10 @@ RECV_LOG_RAW_MAX = 50 * 1024 * 1024
 LARGE_LOG_BYTES = 512 * 1024
 _REPLAY_CHUNK_BATCH = 150
 # 实时串口：合并 after 回调，每 tick 最多处理 N 块 raw 数据
-_LIVE_LOG_BATCH = 64
-_LIVE_LOG_DRAIN_MS = 16
+_LIVE_LOG_BATCH = 128
+_LIVE_LOG_DRAIN_MS = 33
+# idlog bin 映射缓存最短复检间隔（避免每条 log 都 getmtime）
+_IDLOG_MAP_CACHE_TTL_S = 2.0
 
 # (原始字节, 主机时间戳)。时间为 None 表示整段来自加载的文件，刷新时不另加时间戳。
 LogSeg = Tuple[bytes, Optional[str]]
@@ -489,6 +491,13 @@ class EpmDlApp(tk.Tk):
         m_view.add_command(label="接收区字号增大", command=lambda: self._recv_font_step(1))
         m_view.add_command(label="接收区字号减小", command=lambda: self._recv_font_step(-1))
         m_view.add_command(label="接收区字号重置", command=self._recv_font_reset)
+        m_view.add_separator()
+        self._show_send_area_var = tk.BooleanVar(value=True)
+        m_view.add_checkbutton(
+            label="显示发送区",
+            variable=self._show_send_area_var,
+            command=self._on_menu_show_send_area,
+        )
         menubar.add_cascade(label="视图", menu=m_view)
         m_help = tk.Menu(menubar, tearoff=0)
         m_help.add_command(label="关于", command=self._show_about)
@@ -558,6 +567,10 @@ class EpmDlApp(tk.Tk):
             except (TypeError, ValueError):
                 ratio = None
         self.assistant.apply_recv_send_split(ratio)
+        pending = getattr(self, "_pending_show_send_area", None)
+        if pending is not None:
+            self._pending_show_send_area = None
+            self.assistant.set_send_area_visible(pending)
 
     def _set_hpaned_initial_position(self):
         try:
@@ -708,12 +721,23 @@ class EpmDlApp(tk.Tk):
         except (TypeError, ValueError):
             font_size = 10
         self.assistant.set_recv_font_size(font_size)
+        show_send = self._cfg_bool(
+            self.cm.get("ui", "show_send_area", "true"), default=True)
+        self._show_send_area_var.set(show_send)
+        self.assistant.bind_send_area_visible_callback(
+            lambda v: self._show_send_area_var.set(v))
+        # 等首帧 sash 就位后再折叠，避免把错误比例记成「展开还原值」
+        self._pending_show_send_area = show_send
 
     @staticmethod
     def _cfg_bool(val, default: bool = False) -> bool:
         if val is None:
             return default
         return str(val).lower() in ("1", "true", "yes", "on")
+
+    def _on_menu_show_send_area(self):
+        """视图菜单「显示发送区」与底部折叠按钮同步。"""
+        self.assistant.set_send_area_visible(self._show_send_area_var.get())
 
     def _post_status(self, level: str, msg: str):
         """线程安全：写入下载区「状态」面板（非串口接收区）。"""
@@ -767,6 +791,10 @@ class EpmDlApp(tk.Tk):
         self.cm.set(
             "ui", "auto_scroll",
             "true" if self.assistant.auto_scroll.get() else "false",
+        )
+        self.cm.set(
+            "ui", "show_send_area",
+            "true" if self.assistant.is_send_area_visible() else "false",
         )
         self.cm.set(
             "ui", "recv_font_size",
@@ -1042,11 +1070,22 @@ class EpmDlApp(tk.Tk):
     def _flush_live_log_queue(self):
         """关串口/退出前：取消定时 drain 并处理完队列中剩余 raw 块。"""
         self._cancel_live_log_drain()
-        while self._live_log_queue:
-            raw = self._live_log_queue.popleft()
-            self._emit_log_chunk(raw)
+        if not self._live_log_queue:
+            self.assistant.set_defer_scroll(False)
+            self.assistant.flush_pending()
+            return
+        self.assistant.set_defer_scroll(True)
+        self.assistant.begin_append_batch()
+        id_maps = self._build_id_log_maps()
+        ini_map = self.cm.list_id_log_map()
+        try:
+            while self._live_log_queue:
+                self._emit_log_chunk(
+                    self._live_log_queue.popleft(),
+                    id_maps=id_maps, ini_map=ini_map)
+        finally:
+            self.assistant.end_append_batch()
         self.assistant.set_defer_scroll(False)
-        self.assistant.flush_pending()
 
     def _safe_log_line(self, raw: bytes):
         if not raw:
@@ -1063,11 +1102,19 @@ class EpmDlApp(tk.Tk):
             self.assistant.flush_pending()
             return
         backlog = len(self._live_log_queue)
-        self.assistant.set_defer_scroll(backlog > _LIVE_LOG_BATCH)
         n = min(_LIVE_LOG_BATCH, backlog)
-        for _ in range(n):
-            self._emit_log_chunk(self._live_log_queue.popleft())
-        self.assistant.flush_pending()
+        # 整段 drain 推迟滚屏 + 合并 Text insert，避免 20ms 级吐 log 时 UI 卡顿
+        self.assistant.set_defer_scroll(True)
+        self.assistant.begin_append_batch()
+        id_maps = self._build_id_log_maps()
+        ini_map = self.cm.list_id_log_map()
+        try:
+            for _ in range(n):
+                self._emit_log_chunk(
+                    self._live_log_queue.popleft(),
+                    id_maps=id_maps, ini_map=ini_map)
+        finally:
+            self.assistant.end_append_batch()
         if self._live_log_queue:
             self._live_log_drain_after_id = self.after(
                 _LIVE_LOG_DRAIN_MS, self._drain_live_log_queue)
@@ -1136,6 +1183,7 @@ class EpmDlApp(tk.Tk):
     def _on_download_panel_refresh(self):
         """下载区刷新：重载 idlog bin，并重解析接收区中的 ID log。"""
         self._id_log_maps_cache = None
+        self._id_log_maps_cache_mono = 0.0
         self._reparse_recv_log()
 
     def _replay_log_file(self, path: str):
@@ -1208,12 +1256,15 @@ class EpmDlApp(tk.Tk):
             parser = IdLogParser()
             id_maps = self._build_id_log_maps()
             ini_map = self.cm.list_id_log_map()
-            for i, chunk in enumerate(chunks):
-                prefix = None if ts_prefixes is None else ts_prefixes[i]
-                self._emit_log_chunk(
-                    chunk, parser, id_maps, ini_map,
-                    record=False, add_ts=False, ts_prefix=prefix, save=False)
-            self.assistant.flush_pending()
+            self.assistant.begin_append_batch()
+            try:
+                for i, chunk in enumerate(chunks):
+                    prefix = None if ts_prefixes is None else ts_prefixes[i]
+                    self._emit_log_chunk(
+                        chunk, parser, id_maps, ini_map,
+                        record=False, add_ts=False, ts_prefix=prefix, save=False)
+            finally:
+                self.assistant.end_append_batch()
             if on_done:
                 on_done()
             return
@@ -1236,13 +1287,16 @@ class EpmDlApp(tk.Tk):
             return
         end = min(st["index"] + st["batch"], len(st["chunks"]))
         prefixes = st.get("ts_prefixes")
-        for i in range(st["index"], end):
-            prefix = None if prefixes is None else prefixes[i]
-            self._emit_log_chunk(
-                st["chunks"][i], st["parser"], st["id_maps"], st["ini_map"],
-                record=False, add_ts=False, ts_prefix=prefix, save=False)
+        self.assistant.begin_append_batch()
+        try:
+            for i in range(st["index"], end):
+                prefix = None if prefixes is None else prefixes[i]
+                self._emit_log_chunk(
+                    st["chunks"][i], st["parser"], st["id_maps"], st["ini_map"],
+                    record=False, add_ts=False, ts_prefix=prefix, save=False)
+        finally:
+            self.assistant.end_append_batch()
         st["index"] = end
-        self.assistant.flush_pending()
         if st["index"] < len(st["chunks"]):
             self.after(1, self._replay_log_tick)
             return
@@ -1335,8 +1389,15 @@ class EpmDlApp(tk.Tk):
         不按 chip 过滤：9032 设备虽然没 C 核，但 bin_dir 下可能有 idlog_MCU_C.bin
         （9062 的 bin），加载它能保证收到 C 核 log 时也能解析。
         返回 {cpu_id: {log_id: text}}；0xFF (未知核) 用所有 bin 的合并。
-        结果按 (bin 路径, mtime) 缓存，避免每条 ID log 都重新解析 bin 文件。
+        结果按 (bin 路径, mtime) 缓存；TTL 内直接复用，避免每条 log 都 getmtime。
         """
+        now = time.monotonic()
+        cached = getattr(self, "_id_log_maps_cache", None)
+        cache_mono = getattr(self, "_id_log_maps_cache_mono", 0.0)
+        if (cached is not None
+                and (now - cache_mono) < _IDLOG_MAP_CACHE_TTL_S):
+            return cached[1]
+
         _CPU_KEYS = ("mcu_a", "mcu_b", "mcu_c")
         _CPU_ID = {key: i for i, key in enumerate(_CPU_KEYS)}
         paths = self._idlog_bin_paths()
@@ -1354,8 +1415,8 @@ class EpmDlApp(tk.Tk):
                 mtime = None
             cache_entries.append((key, p, mtime, base))
         cache_key = tuple(cache_entries)
-        cached = getattr(self, "_id_log_maps_cache", None)
         if cached is not None and cached[0] == cache_key:
+            self._id_log_maps_cache_mono = now
             return cached[1]
         # 按 cpu_id 绑定 idlog bin（A=0, B=1, C=2），避免缺文件时索引错位
         out = {0: {}, 1: {}, 2: {}}
@@ -1367,6 +1428,7 @@ class EpmDlApp(tk.Tk):
         # 未知核：所有 bin 合并（兜底）
         out[0xFF] = merge_idlog_maps(out[0], out[1], out[2])
         self._id_log_maps_cache = (cache_key, out)
+        self._id_log_maps_cache_mono = now
         return out
 
     @staticmethod

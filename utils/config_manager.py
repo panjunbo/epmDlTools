@@ -115,6 +115,7 @@ class ConfigManager:
             "ui": {
                 "theme": "light",
                 "auto_scroll": "true",
+                "show_send_area": "true",
                 "recv_font_size": "10",
                 # 界面缩放：1.0 = 完全跟随系统显示缩放（VS Code 模型）；
                 # 1.25 = 比系统再大 25%。字号是磅值、像素间距按同一系数放大，
