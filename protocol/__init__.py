@@ -11,7 +11,10 @@ from .frame import (
     RX_SYNC_WORD,
 )
 from .flashload_protocol import FlashloadProtocol, EraseMode, SizeVal as FlashSizeVal
-from .programmer_protocol import ProgrammerProtocol, State as ProgState
+from .programmer_protocol import (
+    ProgrammerProtocol, State as ProgState,
+    DEFAULT_PROGRAMMER_TIMEOUT, parse_idle_timeout,
+)
 
 __all__ = [
     "FrameParser", "RxFrame", "TxFrame", "pack",
@@ -20,4 +23,5 @@ __all__ = [
     "SYNC_WORD", "RX_SYNC_WORD",
     "FlashloadProtocol", "EraseMode", "FlashSizeVal",
     "ProgrammerProtocol", "ProgState",
+    "DEFAULT_PROGRAMMER_TIMEOUT", "parse_idle_timeout",
 ]

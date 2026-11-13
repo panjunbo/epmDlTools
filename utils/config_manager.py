@@ -88,6 +88,8 @@ class ConfigManager:
                 "target_baud": "3000000",
                 "sync_exit": "true",
                 "xip_read": "false",
+                # Idle timeout (seconds) while waiting for a device reply in the programmer phase
+                "prog_timeout": "10",
             },
             "bins": {
                 "default_dir": default_bin_dir(),

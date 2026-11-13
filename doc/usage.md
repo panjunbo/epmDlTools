@@ -87,13 +87,59 @@ python epmDlTool.py --ui
 | 段 | 字段 |
 | --- | --- |
 | `[serial]` | `log_port/log_baud/download_baud/data_bits/parity/stop_bits` |
-| `[flashload]` | 默认擦/写参数 |
+| `[flashload]` | 默认擦/写参数 + `prog_timeout`（空闲超时秒数，默认 10） |
 | `[programmer]` | 默认 bin 地址 |
 | `[crypt_crc]` | 加密 CRC |
 | `[bins]` | `default_dir` + `core_{a,b,c}_{name,file,addr}` |
 | `[id_log]` | `core_{a,b,c}_log` |
 | `[presets]` | `name_i/mode_i/data_i` 列表发送预设 |
 | `[ui]` | 主题、窗口大小 |
+
+### 4.1 programmer 空闲超时
+
+`programmer` 阶段（握手 / 传 bin / JUMP / UNLOCK）等待设备响应的最长空闲时间，
+超时即判定设备无应答并中止。优先级：
+
+```text
+CLI -prog_timeout  >  ini [flashload].prog_timeout  >  默认 10s
+```
+
+CLI：
+
+```bash
+python epmDlTool.py -mode programmer -prog_timeout 30
+```
+
+UI：改 `config/config.ini` 的 `[flashload]` 段，重启（或触发配置重载）后生效：
+
+```ini
+[flashload]
+prog_timeout = 10
+```
+
+也可以在启动界面的命令里带参数：
+
+```bash
+python epmDlTool.py --ui -prog_timeout 30
+```
+
+此时该值**会写回 `config/config.ini`**（状态面板提示「命令行覆盖，已写入 …」），
+下次不带参数启动也保持 30。CLI 一次性下载模式则只对本次生效，不写配置文件。
+
+非法值（非数字 / ≤0）按默认值 10s 处理。
+
+界面启动时会在「状态」面板报出当前生效的值（`programmer 空闲超时 = 10.0s（配置文件）`），
+方便确认配置有没有被读进去。
+
+### 4.2 外部修改 config.ini
+
+`config/config.ini` 可以在程序运行期间用文本编辑器改（菜单 → 文件 → 打开配置文件）。
+界面会在两个时机重读磁盘配置：
+
+- **下载 / 擦除 / 回读开始前** —— 外部改的超时、target_baud 等立即生效；
+- **保存配置 / 关闭程序前** —— 先重读再写回，外部改的键不会被内存里的旧值覆盖掉。
+
+界面里自己填的项（端口、波特率、串口参数等）仍以界面为准，关闭时写回 ini。
 
 ## 5. 冒烟测试
 

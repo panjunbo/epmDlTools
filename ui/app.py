@@ -299,8 +299,10 @@ class EpmDlApp(tk.Tk):
     MIN_WIDTH = 640
     MIN_HEIGHT = 480
 
-    def __init__(self, cfg: dict, cm: ConfigManager, logger: Logger):
+    def __init__(self, cfg: dict, cm: ConfigManager, logger: Logger, args=None):
         super().__init__()
+        # Command line args (--ui may be started with overrides, e.g. -prog_timeout)
+        self._cli_args = args
         # 界面缩放跟随系统显示缩放（VS Code 模型）：物理大小跟系统走，
         # 布局比例不变（像素间距与字号用同一系数放大）。
         # layout_scale 可再乘一档（1.25 = 比系统再大 25%）。
@@ -444,6 +446,44 @@ class EpmDlApp(tk.Tk):
         # bin 文件名填上之后右侧需要的宽度才稳定，再摆一次分隔条、算一次最小窗口
         self._apply_scaled_minsize()
         self._set_hpaned_initial_position()
+        self._apply_cli_overrides()
+
+    def _apply_cli_overrides(self):
+        """Apply command line overrides (e.g. -prog_timeout) and persist them.
+
+        The value is written back to the ini so the next start without the
+        argument keeps the same setting.
+        """
+        timeout = self._cli_prog_timeout()
+        if timeout is not None:
+            try:
+                self.cm.set("flashload", "prog_timeout", str(timeout))
+                self.cm.save()
+            except Exception as e:
+                self.logger.error(f"failed to write config: {e}")
+                return
+            self.logger.info(
+                f"programmer idle timeout = {timeout}s "
+                f"(command line override, written to {self.cm.path})")
+            return
+        # No command line override: report the value from the config file so
+        # it is obvious whether the edit took effect.
+        try:
+            value = float(self.cm.get("flashload", "prog_timeout", "") or "")
+        except (TypeError, ValueError):
+            return
+        self.logger.info(f"programmer idle timeout = {value}s (from config file)")
+
+    def _cli_prog_timeout(self) -> Optional[float]:
+        """Command line -prog_timeout; None when absent or invalid (-> ini / default)."""
+        raw = getattr(self._cli_args, "prog_timeout", None)
+        if raw is None:
+            return None
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            return None
+        return value if value > 0 else None
 
     def _apply_scaled_minsize(self):
         """最小窗口随系统缩放变大，且不小于右栏内容的实际需要。
@@ -746,7 +786,7 @@ class EpmDlApp(tk.Tk):
         self.after(0, lambda lv=level, t=text: self.dl_panel.append_status(t, lv))
 
     def _on_serial_warn(self, msg: str):
-        """串口面板的告警（如波特率输入非法）→ 下载区状态面板。"""
+        """Serial panel warning (e.g. invalid baud) -> download status panel."""
         self._post_status("WARN", msg)
 
     def _wire_logger_to_ui(self):
@@ -855,9 +895,25 @@ class EpmDlApp(tk.Tk):
             self.logger.error(f"保存 bin 勾选失败: {e}")
 
     def _save_config_now(self):
+        # Re-read first: keys edited outside must not be overwritten by the
+        # stale in-memory values.
+        self._reload_config()
         self._collect_ui_to_cfg()
         self.cm.save()
         self.logger.info(f"配置已保存: {self.cm.path}")
+
+    def _reload_config(self):
+        """Re-read the config from disk.
+
+        The ini can be edited by hand while the program runs (the File menu
+        opens it in an editor). The in-memory copy is a startup snapshot, so
+        without a reload external edits never take effect and would even be
+        overwritten by the stale values on exit.
+        """
+        try:
+            self.cm.reload()
+        except Exception as e:
+            self.logger.warn(f"failed to reload config: {e}")
 
     def _open_config_file(self):
         if not os.path.exists(self.cm.path):
@@ -1490,6 +1546,8 @@ class EpmDlApp(tk.Tk):
         if self._worker is not None and self._worker.is_alive():
             self.logger.warn("已有任务在进行中")
             return
+        # Pick up edits made to the ini outside the program (applies before download)
+        self._reload_config()
         chip = params["chip_type"]
         spec = DOWNLOAD_SPEC.get(chip)
         if spec is None:
@@ -1699,6 +1757,8 @@ class EpmDlApp(tk.Tk):
         if self._worker is not None and self._worker.is_alive():
             self.logger.warn("已有任务在进行中")
             return
+        # Pick up edits made to the ini outside the program (applies before erase/read)
+        self._reload_config()
         try:
             addr = int(str(params["addr"]), 0)
             size = int(str(params["size"]), 0)
@@ -1980,6 +2040,8 @@ class EpmDlApp(tk.Tk):
     def _run_programmer(self, mgr: "SerialManager", bin_path: str, addr: int) -> int:
         from commands import ProgrammerCommand
 
+        # Idle timeout order: CLI -prog_timeout > ini [flashload].prog_timeout > 10s
+        # (resolved by ProgrammerCommand._resolve_timeout)
         cfg = dict(self.cm.read())
         cfg["comm_type"] = self.serial_panel.comm_type.get()
         cfg["programmer_bin_path"] = bin_path
@@ -1988,6 +2050,7 @@ class EpmDlApp(tk.Tk):
             comm_type=cfg["comm_type"],
             programmer_bin_path=bin_path,
             programmer_bin_addr=hex(addr),
+            prog_timeout=self._cli_prog_timeout(),
             unlock=False, dry_run=False,
         )
         # 固定 500K（与 bat 中 programmer 阶段一致：不开 -uart_baud，
@@ -2087,6 +2150,9 @@ class EpmDlApp(tk.Tk):
         return self._base_logger
 
     def _on_close(self):
+        # Re-read first: keys edited outside must not be overwritten by the
+        # stale in-memory values.
+        self._reload_config()
         self._collect_ui_to_cfg()
         try:
             self.cm.save()

@@ -73,6 +73,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="programmer.bin 路径")
     p.add_argument("-programmer_bin_addr", default="0x50540000",
                    help="programmer.bin 烧录地址（hex 或十进制）")
+    p.add_argument("-prog_timeout", type=float, default=None,
+                   help="programmer 阶段等待设备响应的空闲超时（秒；"
+                        "不指定则取 ini [flashload].prog_timeout，默认 10）")
     p.add_argument("--unlock", action="store_true",
                    help="仅发送 UNLOCK 命令（-mode programmer 下的便捷别名）")
 
@@ -169,14 +172,15 @@ def run_cli(args, cfg, logger):
         return 1
 
 
-def run_ui(cm, logger, cfg=None):
+def run_ui(cm, logger, cfg=None, args=None):
     try:
         from ui.app import EpmDlApp
     except ImportError as e:
         print(f"UI 模块加载失败: {e}", file=sys.stderr)
         return 2
     _enable_dpi_awareness()
-    app = EpmDlApp(cfg=cfg if cfg is not None else cm.read(), cm=cm, logger=logger)
+    app = EpmDlApp(cfg=cfg if cfg is not None else cm.read(), cm=cm, logger=logger,
+                   args=args)
     app.mainloop()
     return 0
 
@@ -201,7 +205,8 @@ def main(argv=None):
 
     if args.ui:
         # UI 路径不加载 commands/protocol，缩短启动时间
-        return run_ui(cm, logger, cfg)
+        # args is passed in so command line overrides (e.g. -prog_timeout) also apply to the UI
+        return run_ui(cm, logger, cfg, args=args)
     if args.mode is None:
         parser.print_help()
         return 2

@@ -29,9 +29,31 @@ class State(Enum):
     UNLOCK = 4
 
 
+# Default idle timeout (seconds) while waiting for a device reply in the
+# programmer phase.
+DEFAULT_PROGRAMMER_TIMEOUT = 10.0
+
+
+def parse_idle_timeout(value, default: float = DEFAULT_PROGRAMMER_TIMEOUT) -> float:
+    """Parse an idle timeout in seconds: None / invalid / <=0 -> default.
+
+    <=0 counts as invalid: 0 would trip the timeout on the very first tick
+    and a negative timeout makes no sense.
+    """
+    if value is None:
+        return default
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        return default
+    return seconds if seconds > 0 else default
+
+
 class ProgrammerProtocol:
     # 握手 / 等 ACK 阶段最长无响应时间（秒）。超过后视为设备无应答。
-    DEFAULT_IDLE_TIMEOUT = 10.0
+    DEFAULT_IDLE_TIMEOUT = DEFAULT_PROGRAMMER_TIMEOUT
+    # cfg key holding the idle timeout (CLI -prog_timeout / ini [flashload].prog_timeout)
+    CFG_TIMEOUT_KEY = "prog_timeout"
 
     def __init__(self, comm: CommunicationInterface, bin_parse: BinParse,
                  cfg: dict, logger: Logger, unlock: bool = False):
@@ -54,11 +76,12 @@ class ProgrammerProtocol:
             else SizeVal.SIZE_256.value
         )
 
-        # 空闲超时：cfg 可覆盖，便于调试
-        try:
-            self.idle_timeout = float(cfg.get("handshake_timeout", self.DEFAULT_IDLE_TIMEOUT))
-        except (TypeError, ValueError):
-            self.idle_timeout = self.DEFAULT_IDLE_TIMEOUT
+        # Idle timeout: overridable via cfg (CLI -prog_timeout / ini [flashload].prog_timeout)
+        raw_timeout = cfg.get(self.CFG_TIMEOUT_KEY)
+        if raw_timeout is None:
+            # Legacy key name (no code path ever wrote it; kept for compatibility)
+            raw_timeout = cfg.get("handshake_timeout")
+        self.idle_timeout = parse_idle_timeout(raw_timeout, self.DEFAULT_IDLE_TIMEOUT)
         self._last_activity = time.monotonic()
         self._last_wait_log = 0.0
 
