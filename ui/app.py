@@ -344,6 +344,7 @@ class EpmDlApp(tk.Tk):
             on_open=self._open_serial,
             on_close=self._close_serial,
             on_open_params=self._open_param_dialog,
+            on_warn=self._on_serial_warn,
         )
 
         self.erase_read_panel = EraseReadPanel(
@@ -663,8 +664,8 @@ class EpmDlApp(tk.Tk):
             )
             self.cm.set("serial", "download_port", log_port)
         sp.port.set(log_port or sp.port.get())
-        sp.log_baud.set(self.cm.get("serial", "log_baud", "500000"))
-        sp.dl_baud.set(self.cm.get("serial", "download_baud", "3000000"))
+        sp.set_log_baud(self.cm.get("serial", "log_baud", "500000"))
+        sp.set_dl_baud(self.cm.get("serial", "download_baud", "3000000"))
         sp.comm_type.set(self.cm.get("flashload", "comm_type", "uart"))
         sp.data_bits.set(self.cm.get("serial", "data_bits", "8"))
         sp.parity.set(self.cm.get("serial", "parity", "none"))
@@ -744,6 +745,10 @@ class EpmDlApp(tk.Tk):
         text = msg.rstrip()
         self.after(0, lambda lv=level, t=text: self.dl_panel.append_status(t, lv))
 
+    def _on_serial_warn(self, msg: str):
+        """串口面板的告警（如波特率输入非法）→ 下载区状态面板。"""
+        self._post_status("WARN", msg)
+
     def _wire_logger_to_ui(self):
         def ui_sink(level: str, msg: str):
             # 程序日志 → 状态面板；串口接收区仅显示设备数据 / 解析 ID log
@@ -755,8 +760,8 @@ class EpmDlApp(tk.Tk):
         port = sp.port.get()
         self.cm.set("serial", "log_port", port)
         self.cm.set("serial", "download_port", port)
-        self.cm.set("serial", "log_baud", sp.log_baud.get())
-        self.cm.set("serial", "download_baud", sp.dl_baud.get())
+        self.cm.set("serial", "log_baud", str(sp.get_log_baud()))
+        self.cm.set("serial", "download_baud", str(sp.get_dl_baud()))
         self.cm.set("serial", "data_bits", sp.data_bits.get())
         self.cm.set("serial", "parity", sp.parity.get())
         self.cm.set("serial", "stop_bits", sp.stop_bits.get())
@@ -995,9 +1000,9 @@ class EpmDlApp(tk.Tk):
         if self._serial_manager is None:
             self._serial_manager = SerialManager(
                 log_port=sp.port.get(),
-                log_baud=int(sp.log_baud.get()),
+                log_baud=sp.get_log_baud(),
                 download_port=sp.port.get(),
-                download_baud=int(sp.dl_baud.get()),
+                download_baud=sp.get_dl_baud(),
                 comm_type=sp.comm_type.get(),
                 on_log_line=lambda b: self._safe_log_line(b),
                 flush_timeout_ms=ft_ms,
@@ -1005,9 +1010,9 @@ class EpmDlApp(tk.Tk):
         else:
             # 每次都同步 UI 当前值，防止用户改 port/baud 后用旧值
             self._serial_manager._log_port = sp.port.get()
-            self._serial_manager._log_baud = int(sp.log_baud.get())
+            self._serial_manager._log_baud = sp.get_log_baud()
             self._serial_manager._download_port = sp.port.get()
-            self._serial_manager._download_baud = int(sp.dl_baud.get())
+            self._serial_manager._download_baud = sp.get_dl_baud()
             self._serial_manager._comm_type = sp.comm_type.get()
             self._serial_manager.set_flush_timeout_ms(ft_ms)
         return self._serial_manager
@@ -1029,7 +1034,7 @@ class EpmDlApp(tk.Tk):
         # （target_baud=0 的语义保留：表示不切换，保持 500K）
         try:
             port = self.serial_panel.port.get()
-            dl_baud = int(self.serial_panel.dl_baud.get())
+            dl_baud = self.serial_panel.get_dl_baud()
             self.cm.set("serial", "log_port", port)
             self.cm.set("serial", "download_port", port)
             self.cm.set("serial", "download_baud", str(dl_baud))
@@ -1042,7 +1047,7 @@ class EpmDlApp(tk.Tk):
         ok = mgr.open_log()
         if ok:
             self._active_comm = mgr.log_serial
-            self.logger.info(f"串口已打开: {self.serial_panel.port.get()} @ {self.serial_panel.log_baud.get()}")
+            self.logger.info(f"串口已打开: {self.serial_panel.port.get()} @ {self.serial_panel.get_log_baud()}")
             # 新的串口会话：自动保存开启时切换到新的日志文件
             self.assistant.restart_auto_save()
         else:
@@ -1517,16 +1522,16 @@ class EpmDlApp(tk.Tk):
         mgr = self._ensure_manager()
         sp = self.serial_panel
         mgr._log_port = sp.port.get()
-        mgr._log_baud = int(sp.log_baud.get())
+        mgr._log_baud = sp.get_log_baud()
         mgr._download_port = sp.port.get()
-        mgr._download_baud = int(sp.dl_baud.get())
+        mgr._download_baud = sp.get_dl_baud()
         mgr._comm_type = sp.comm_type.get()
         self._serial_manager = mgr
         # 同步 UI "下载" 波特率到 ini 的 [serial].download_baud 和 [flashload].target_baud，
         # 这样 _run_download 读到的 target_baud_cfg 就是 Combobox 当前值
         try:
-            self.cm.set("serial", "download_baud", str(int(sp.dl_baud.get())))
-            self.cm.set("flashload", "target_baud", str(int(sp.dl_baud.get())))
+            self.cm.set("serial", "download_baud", str(sp.get_dl_baud()))
+            self.cm.set("flashload", "target_baud", str(sp.get_dl_baud()))
             self.cm.save()
         except Exception:
             pass
@@ -1716,7 +1721,7 @@ class EpmDlApp(tk.Tk):
         mgr = self._ensure_manager()
         sp = self.serial_panel
         mgr._log_port = sp.port.get()
-        mgr._log_baud = int(sp.log_baud.get())
+        mgr._log_baud = sp.get_log_baud()
         mgr._download_port = sp.port.get()
         # 擦除/回读不切波特率：programmer JUMP 后 device 处于 500K，
         # PC 端必须同步开 500K；后续 flashload 命令由 protocol 把 target_baud=0

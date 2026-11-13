@@ -116,31 +116,53 @@ def _monitor_span(widget: tk.Misc) -> Optional[Tuple[int, int]]:
 
 BAUD_RATES = [
     "1200", "2400", "4800", "9600", "19200", "38400",
-    "57600", "115200", "230400", "460800", "500000", "921600", "1500000", "3000000",
+    "57600", "115200", "230400", "460800", "500000", "921600", "1000000", "1500000", "3000000",
 ]
+
+DEFAULT_LOG_BAUD = 500000
+DEFAULT_DL_BAUD = 3000000
 
 DATA_BITS = ["5", "6", "7", "8"]
 PARITY = ["none", "even", "odd", "mark", "space"]
 STOP_BITS = ["1", "1.5", "2"]
 
 
+def parse_baud(text) -> Optional[int]:
+    """波特率文本 → 正整数；空/非法返回 None。
+
+    波特率输入框允许用户手输任意整数（不只是下拉列表里的标准值），
+    这里统一做合法性校验，避免把 "abc" 之类传给 pyserial。
+    """
+    s = str(text if text is not None else "").strip()
+    if not s or not re.fullmatch(r"[0-9]+", s):
+        return None
+    value = int(s, 10)
+    return value if value > 0 else None
+
+
 class SerialPanel(ttk.LabelFrame):
     def __init__(self, master,
                  on_open: Optional[Callable[[], bool]] = None,
                  on_close: Optional[Callable[[], None]] = None,
-                 on_open_params: Optional[Callable[[], None]] = None):
+                 on_open_params: Optional[Callable[[], None]] = None,
+                 on_warn: Optional[Callable[[str], None]] = None):
         super().__init__(master, text="串口配置")
         self._on_open = on_open
         self._on_close = on_close
         self._on_open_params = on_open_params
+        self._on_warn = on_warn
         self._opened = False
 
         self.port = tk.StringVar()
         # 下拉框显示「COM5 USB Serial Port」；self.port 只保留端口号供打开/保存
         self.port_label = tk.StringVar()
         self._port_by_label = {}
-        self.log_baud = tk.StringVar(value="500000")
-        self.dl_baud = tk.StringVar(value="3000000")
+        self.log_baud = tk.StringVar(value=str(DEFAULT_LOG_BAUD))
+        self.dl_baud = tk.StringVar(value=str(DEFAULT_DL_BAUD))
+        # 上一次通过校验的波特率：用户输入非法值时回退到这里
+        self._last_log_baud = DEFAULT_LOG_BAUD
+        self._last_dl_baud = DEFAULT_DL_BAUD
+        self._baud_warn = ""
         self.comm_type = tk.StringVar(value="uart")
         self.data_bits = tk.StringVar(value="8")
         self.parity = tk.StringVar(value="none")
@@ -166,15 +188,22 @@ class SerialPanel(ttk.LabelFrame):
 
         ttk.Label(self, text="日志").grid(
             row=1, column=0, sticky=tk.W, padx=_label_padx, pady=2)
+        # state="normal"：可下拉选择，也可直接手输任意波特率
         self.cmb_log = ttk.Combobox(self, textvariable=self.log_baud, values=BAUD_RATES,
-                                    width=8, state="readonly")
+                                    width=8, state="normal")
         self.cmb_log.grid(row=1, column=1, sticky=tk.EW, padx=(4, 8), pady=2)
+        self.cmb_log.bind("<FocusOut>", lambda _e: self._check_baud("log"))
+        self.cmb_log.bind("<Return>", lambda _e: self._check_baud("log"))
+        self.cmb_log.bind("<<ComboboxSelected>>", lambda _e: self._check_baud("log"))
 
         ttk.Label(self, text="下载").grid(
             row=2, column=0, sticky=tk.W, padx=_label_padx, pady=2)
         self.cmb_dl = ttk.Combobox(self, textvariable=self.dl_baud, values=BAUD_RATES,
-                                   width=8, state="readonly")
+                                   width=8, state="normal")
         self.cmb_dl.grid(row=2, column=1, sticky=tk.EW, padx=(4, 8), pady=2)
+        self.cmb_dl.bind("<FocusOut>", lambda _e: self._check_baud("dl"))
+        self.cmb_dl.bind("<Return>", lambda _e: self._check_baud("dl"))
+        self.cmb_dl.bind("<<ComboboxSelected>>", lambda _e: self._check_baud("dl"))
         for combo in (self.cmb_port, self.cmb_log, self.cmb_dl):
             self._apply_field_font(combo)
 
@@ -188,7 +217,8 @@ class SerialPanel(ttk.LabelFrame):
         # 主面板显示当前参数摘要（8-N-1），弹窗仅用于修改
         self.params_summary = tk.StringVar(value=self._summarize())
         self.status = tk.StringVar(value="已关闭")
-        ttk.Label(self, textvariable=self.status, foreground="#888").grid(
+        self._status_label = ttk.Label(self, textvariable=self.status, foreground="#888")
+        self._status_label.grid(
             row=3, column=0, columnspan=2, sticky=tk.W, padx=_label_padx, pady=2)
         ttk.Label(self, textvariable=self.params_summary, foreground="#888").grid(
             row=3, column=2, sticky=tk.E, padx=_label_padx, pady=2)
@@ -307,8 +337,9 @@ class SerialPanel(ttk.LabelFrame):
 
     def _set_state(self, opened: bool):
         self._opened = opened
+        self._baud_warn = ""
+        self._refresh_status()
         if opened:
-            self.status.set(f"已打开: {self.port.get()}")
             self.btn_toggle.configure(text="关闭串口", state=tk.NORMAL)
             # 串口打开期间，端口/波特率/串口参数/刷新端口 全部锁定（避免改动后状态不一致）
             self.cmb_port.configure(state="disabled")
@@ -317,13 +348,97 @@ class SerialPanel(ttk.LabelFrame):
             self.btn_params.configure(state="disabled")
             self.btn_refresh.configure(state="disabled")
         else:
-            self.status.set("已关闭")
             self.btn_toggle.configure(text="打开串口", state=tk.NORMAL)
             self.cmb_port.configure(state="readonly")
-            self.cmb_log.configure(state="readonly")
-            self.cmb_dl.configure(state="readonly")
+            # 波特率框可编辑：下拉选标准值，或直接手输
+            self.cmb_log.configure(state="normal")
+            self.cmb_dl.configure(state="normal")
             self.btn_params.configure(state="normal")
             self.btn_refresh.configure(state="normal")
+
+    def _refresh_status(self):
+        """状态栏：优先显示波特率告警，否则显示串口开关状态。"""
+        if self._baud_warn:
+            self.status.set(self._baud_warn)
+            try:
+                self._status_label.configure(foreground="#c0392b")
+            except tk.TclError:
+                pass
+        else:
+            if self._opened:
+                self.status.set(f"已打开: {self.port.get()}")
+            else:
+                self.status.set("已关闭")
+            try:
+                self._status_label.configure(foreground="#888")
+            except tk.TclError:
+                pass
+
+    def _check_baud(self, which: str):
+        """校验波特率输入：合法则记为最新值，非法则回退到上一个合法值并提示。"""
+        if which == "log":
+            var, name = self.log_baud, "日志"
+        else:
+            var, name = self.dl_baud, "下载"
+        raw = var.get()
+        value = parse_baud(raw)
+        if value is None:
+            last = self._last_log_baud if which == "log" else self._last_dl_baud
+            var.set(str(last))
+            # 面板上只显示短提示（位置窄），完整原因发到状态面板
+            detail = (f"{name}波特率无效：{raw.strip() or '(空)'}，已恢复为 {last}")
+            self._warn_baud(f"{name}波特率无效", detail)
+            return
+        # 规范化（去掉前后空格、前导零）
+        var.set(str(value))
+        if which == "log":
+            self._last_log_baud = value
+        else:
+            self._last_dl_baud = value
+        if self._baud_warn:
+            self._baud_warn = ""
+            self._refresh_status()
+
+    def _warn_baud(self, short_msg: str, detail: str = ""):
+        self._baud_warn = short_msg
+        self._refresh_status()
+        try:
+            self.bell()
+        except tk.TclError:
+            pass
+        if self._on_warn:
+            try:
+                self._on_warn(detail or short_msg)
+            except Exception:
+                pass
+
+    def get_log_baud(self) -> int:
+        """日志波特率（int）；非法值回退到上一个合法值。"""
+        self._check_baud("log")
+        return self._last_log_baud
+
+    def get_dl_baud(self) -> int:
+        """下载波特率（int）；非法值回退到上一个合法值。"""
+        self._check_baud("dl")
+        return self._last_dl_baud
+
+    def set_log_baud(self, value) -> int:
+        """从配置写入日志波特率；非法值退回默认值。"""
+        baud = parse_baud(value)
+        if baud is None:
+            baud = DEFAULT_LOG_BAUD
+        self.log_baud.set(str(baud))
+        self._last_log_baud = baud
+        return baud
+
+    def set_dl_baud(self, value) -> int:
+        """从配置写入下载波特率；非法值退回默认值。"""
+        baud = parse_baud(value)
+        if baud is None:
+            baud = DEFAULT_DL_BAUD
+        self.dl_baud.set(str(baud))
+        self._last_dl_baud = baud
+        return baud
 
     def mark_closed(self):
         self._set_state(False)
@@ -353,9 +468,9 @@ class SerialPanel(ttk.LabelFrame):
     def collect(self) -> dict:
         return {
             "port": self.port.get(),
-            "log_baud": self.log_baud.get(),
+            "log_baud": str(self.get_log_baud()),
             "download_port": self.port.get(),
-            "download_baud": self.dl_baud.get(),
+            "download_baud": str(self.get_dl_baud()),
             "data_bits": self.data_bits.get(),
             "parity": self.parity.get(),
             "stop_bits": self.stop_bits.get(),
