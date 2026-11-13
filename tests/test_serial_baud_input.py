@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
-"""串口波特率可手输：任意整数都接受，非法值回退到上一个合法值。"""
+"""Serial baud rates can be typed: any integer is accepted, invalid values
+fall back to the last valid one."""
 import os
 import sys
 
@@ -11,7 +12,7 @@ from ui.serial_panel import parse_baud
 def test_parse_baud_accepts_plain_integers():
     assert parse_baud("115200") == 115200
     assert parse_baud("  921600  ") == 921600
-    assert parse_baud("123456") == 123456  # 非标准波特率也允许
+    assert parse_baud("123456") == 123456  # non-standard rate is fine too
 
 
 def test_parse_baud_rejects_garbage():
@@ -25,7 +26,7 @@ def test_parse_baud_rejects_garbage():
 
 
 def _make_panel():
-    """建一个真实的 SerialPanel（需要 Tk 环境）。"""
+    """Build a real SerialPanel (needs a Tk environment)."""
     import tkinter as tk
     from ui.serial_panel import SerialPanel
 
@@ -49,7 +50,7 @@ def test_panel_accepts_typed_baud():
         return
     root, panel = _make_panel()
     try:
-        # 模拟用户手输非标准波特率
+        # Simulate the user typing a non-standard baud rate
         panel.log_baud.set("123456")
         assert panel.get_log_baud() == 123456
         assert panel.log_baud.get() == "123456"
@@ -69,7 +70,7 @@ def test_panel_reverts_invalid_baud():
         assert panel.get_log_baud() == 115200
 
         panel.log_baud.set("abc")
-        assert panel.get_log_baud() == 115200  # 回退到上一个合法值
+        assert panel.get_log_baud() == 115200  # fell back to the last valid value
         assert panel.log_baud.get() == "115200"
     finally:
         root.destroy()
@@ -102,7 +103,7 @@ def test_panel_set_from_config_falls_back_on_bad_value():
     try:
         assert panel.set_log_baud("115200") == 115200
         assert panel.log_baud.get() == "115200"
-        # 配置里写了垃圾值 → 退回默认值，不把垃圾带进 UI
+        # Garbage in the config -> fall back to the default, keep it out of the UI
         assert panel.set_log_baud("bad") == 500000
         assert panel.log_baud.get() == "500000"
         assert panel.set_dl_baud("bad") == 3000000

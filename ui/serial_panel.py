@@ -129,10 +129,11 @@ STOP_BITS = ["1", "1.5", "2"]
 
 
 def parse_baud(text) -> Optional[int]:
-    """波特率文本 → 正整数；空/非法返回 None。
+    """Parse a baud rate into a positive integer; None when empty/invalid.
 
-    波特率输入框允许用户手输任意整数（不只是下拉列表里的标准值），
-    这里统一做合法性校验，避免把 "abc" 之类传给 pyserial。
+    The baud boxes accept any integer typed by hand (not just the standard
+    rates in the drop-down). Validating here keeps values like "abc" from
+    ever reaching pyserial.
     """
     s = str(text if text is not None else "").strip()
     if not s or not re.fullmatch(r"[0-9]+", s):
@@ -160,7 +161,7 @@ class SerialPanel(ttk.LabelFrame):
         self._port_by_label = {}
         self.log_baud = tk.StringVar(value=str(DEFAULT_LOG_BAUD))
         self.dl_baud = tk.StringVar(value=str(DEFAULT_DL_BAUD))
-        # 上一次通过校验的波特率：用户输入非法值时回退到这里
+        # Last validated baud rate: fallback when the user types an invalid value
         self._last_log_baud = DEFAULT_LOG_BAUD
         self._last_dl_baud = DEFAULT_DL_BAUD
         self._baud_warn = ""
@@ -189,7 +190,7 @@ class SerialPanel(ttk.LabelFrame):
 
         ttk.Label(self, text="日志").grid(
             row=1, column=0, sticky=tk.W, padx=_label_padx, pady=2)
-        # state="normal"：可下拉选择，也可直接手输任意波特率
+        # state="normal": pick a standard rate from the list or type any rate
         self.cmb_log = ttk.Combobox(self, textvariable=self.log_baud, values=BAUD_RATES,
                                     width=8, state="normal")
         self.cmb_log.grid(row=1, column=1, sticky=tk.EW, padx=(4, 8), pady=2)
@@ -351,14 +352,14 @@ class SerialPanel(ttk.LabelFrame):
         else:
             self.btn_toggle.configure(text="打开串口", state=tk.NORMAL)
             self.cmb_port.configure(state="readonly")
-            # 波特率框可编辑：下拉选标准值，或直接手输
+            # Baud boxes are editable: pick a standard rate or type one
             self.cmb_log.configure(state="normal")
             self.cmb_dl.configure(state="normal")
             self.btn_params.configure(state="normal")
             self.btn_refresh.configure(state="normal")
 
     def _refresh_status(self):
-        """状态栏：优先显示波特率告警，否则显示串口开关状态。"""
+        """Status line: baud warning if any, otherwise the port state."""
         if self._baud_warn:
             self.status.set(self._baud_warn)
             try:
@@ -376,7 +377,7 @@ class SerialPanel(ttk.LabelFrame):
                 pass
 
     def _check_baud(self, which: str):
-        """校验波特率输入：合法则记为最新值，非法则回退到上一个合法值并提示。"""
+        """Validate a baud entry: remember valid values, fall back on invalid."""
         if which == "log":
             var, name = self.log_baud, "日志"
         else:
@@ -386,11 +387,11 @@ class SerialPanel(ttk.LabelFrame):
         if value is None:
             last = self._last_log_baud if which == "log" else self._last_dl_baud
             var.set(str(last))
-            # 面板上只显示短提示（位置窄），完整原因发到状态面板
+            # Short hint on the panel (it is narrow); the full reason goes to the status panel
             detail = (f"{name}波特率无效：{raw.strip() or '(空)'}，已恢复为 {last}")
             self._warn_baud(f"{name}波特率无效", detail)
             return
-        # 规范化（去掉前后空格、前导零）
+        # Normalize (strip surrounding blanks and leading zeros)
         var.set(str(value))
         if which == "log":
             self._last_log_baud = value
@@ -414,17 +415,17 @@ class SerialPanel(ttk.LabelFrame):
                 pass
 
     def get_log_baud(self) -> int:
-        """日志波特率（int）；非法值回退到上一个合法值。"""
+        """Log baud rate (int); invalid values fall back to the last valid one."""
         self._check_baud("log")
         return self._last_log_baud
 
     def get_dl_baud(self) -> int:
-        """下载波特率（int）；非法值回退到上一个合法值。"""
+        """Download baud rate (int); invalid values fall back to the last valid one."""
         self._check_baud("dl")
         return self._last_dl_baud
 
     def set_log_baud(self, value) -> int:
-        """从配置写入日志波特率；非法值退回默认值。"""
+        """Set the log baud rate from the config; invalid values use the default."""
         baud = parse_baud(value)
         if baud is None:
             baud = DEFAULT_LOG_BAUD
@@ -433,7 +434,7 @@ class SerialPanel(ttk.LabelFrame):
         return baud
 
     def set_dl_baud(self, value) -> int:
-        """从配置写入下载波特率；非法值退回默认值。"""
+        """Set the download baud rate from the config; invalid values use the default."""
         baud = parse_baud(value)
         if baud is None:
             baud = DEFAULT_DL_BAUD
