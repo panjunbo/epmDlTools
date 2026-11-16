@@ -1,9 +1,35 @@
 import configparser
 import os
 import sys
-from typing import Any, Optional
+from typing import Any, List, Optional
 
 from utils.app_paths import default_bin_dir, is_frozen_exe
+
+# 最近使用的 bin 目录：下拉里最多保留这么多条，超出的把最旧的挤掉
+RECENT_DIR_MAX = 5
+
+
+def push_recent_dir(recent: List[str], path: str,
+                    limit: int = RECENT_DIR_MAX) -> List[str]:
+    """把 path 提到最近目录列表最前面（去重、截断到 limit 条）。
+
+    返回新列表；path 为空时原样返回。目录按字符串精确比较，大小写不同
+    算不同目录（Windows 上同一个目录可能被写成不同大小写）。
+    """
+    if limit <= 0:
+        return []
+    p = str(path or "").strip()
+    if not p:
+        return list(recent)
+    out = [p]
+    for item in recent:
+        s = str(item or "").strip()
+        if not s or s == p or s in out:
+            continue
+        out.append(s)
+        if len(out) >= limit:
+            break
+    return out
 
 
 class ConfigManager:
@@ -12,7 +38,7 @@ class ConfigManager:
             base = os.path.dirname(os.path.abspath(sys.argv[0]))
             path = os.path.join(base, "config", "config.ini")
         self.path = path
-        self._parser = configparser.ConfigParser()
+        self._parser = configparser.ConfigParser(interpolation=None)
         self.reload()
 
     def reload(self):
@@ -21,8 +47,11 @@ class ConfigManager:
         加载后调 ensure_defaults() 把缺失的段/键补回默认值（idempotent——
         已存在的 key 不覆盖）。这样即使 ini 不存在或被外部删空，bin 识别
         和 id_log 仍能给出合理默认，UI 不会出现"一片空白"的情况。
+
+        解析器关掉插值：ini 里存的是路径/地址，路径里带 % （如 C:\\100%\\bin）
+        会被默认的插值语法当成错误，写入时直接抛异常。
         """
-        self._parser = configparser.ConfigParser()
+        self._parser = configparser.ConfigParser(interpolation=None)
         if os.path.exists(self.path):
             self._parser.read(self.path, encoding="utf-8")
         self.ensure_defaults()
@@ -186,6 +215,51 @@ class ConfigManager:
                 "mode": "programmer" if key == "programmer" else "flashload",
             }
         return out
+
+    def list_recent_dirs(self) -> List[str]:
+        """[bins] 段里的最近 bin 目录（recent_dir_1..N，新的在前）。
+
+        存成一条条单独的键而不是拼在一个字符串里：路径里有各种符号，
+        分开存不会和分隔符打架，手工编辑 ini 也方便。
+        """
+        out: List[str] = []
+        for i in range(1, RECENT_DIR_MAX + 1):
+            d = (self.get("bins", f"recent_dir_{i}", "") or "").strip()
+            if not d:
+                break
+            out.append(d)
+        return out
+
+    def save_recent_dirs(self, dirs: Optional[List[str]]) -> bool:
+        """写入最近目录列表，返回内容是否与原来不同。
+
+        多余的 recent_dir_N 会被删掉：列表变短、或 ini 里还留着上限调整前
+        的旧项（例如上限从 10 改成 5 之后留下的），否则旧目录会一直留在下拉里。
+        """
+        clean: List[str] = []
+        for d in dirs or []:
+            p = str(d or "").strip()
+            if p and p not in clean:
+                clean.append(p)
+            if len(clean) >= RECENT_DIR_MAX:
+                break
+        stale = self._recent_dir_keys()[len(clean):]
+        if clean == self.list_recent_dirs() and not stale:
+            return False
+        for i, p in enumerate(clean, 1):
+            self.set("bins", f"recent_dir_{i}", p)
+        for key in stale:
+            self._parser.remove_option("bins", key)
+        return True
+
+    def _recent_dir_keys(self) -> List[str]:
+        """ini 里现有的 recent_dir_ 键（按序号排）。"""
+        keys: List[str] = []
+        i = 1
+        while self.has_option("bins", f"recent_dir_{i}"):
+            keys.append(f"recent_dir_{i}")
+            i += 1
+        return keys
 
     def list_presets(self) -> list:
         out = []

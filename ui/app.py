@@ -365,6 +365,7 @@ class EpmDlApp(tk.Tk):
             on_refresh=self._on_download_panel_refresh,
             on_bin_selection_changed=self._persist_bin_selection,
             on_reload_bin_selection=self._load_bin_selection,
+            on_recent_dirs_changed=self._persist_recent_dirs,
         )
 
         # 串口/加载 log 的原始字节缓存，供刷新 idlog bin 后重解析。
@@ -720,6 +721,8 @@ class EpmDlApp(tk.Tk):
 
         chip = self.cm.get("bins", "default_chip", "9032")
         self.dl_panel.bin_dir.set(self.cm.get("bins", "default_dir", "./bin"))
+        # 路径下拉里的最近目录（新的在前）
+        self.dl_panel.set_recent_dirs(self.cm.list_recent_dirs())
         self.dl_panel.chip_type.set(chip)
         # 下载后 reset：是否执行 + rdelay（秒，默认 2）
         self.dl_panel.do_reset.set(
@@ -815,6 +818,7 @@ class EpmDlApp(tk.Tk):
         self.cm.set("flashload", "reset_rdelay", self.dl_panel.rdelay.get())
         self.cm.set("bins", "default_chip", self.dl_panel.chip_type.get())
         self.cm.set("bins", "default_dir", self.dl_panel.bin_dir.get())
+        self.cm.save_recent_dirs(self.dl_panel.get_recent_dirs())
         bin_paths, id_log_paths = self.dl_panel.collect_manual_paths_state()
         for key in DownloadPanel.BINARY_KEYS:
             self.cm.set("bins", f"manual_path_{key}", bin_paths.get(key, ""))
@@ -893,6 +897,18 @@ class EpmDlApp(tk.Tk):
             self.cm.save()
         except Exception as e:
             self.logger.error(f"保存 bin 勾选失败: {e}")
+
+    def _persist_recent_dirs(self, dirs: List[str]):
+        """路径下拉里的最近目录：立刻写进 ini（不用等程序退出）。
+
+        换一次 bin 目录就写一次，程序崩了/被强杀也不会丢。
+        """
+        if not self.cm.save_recent_dirs(dirs):
+            return
+        try:
+            self.cm.save()
+        except Exception as e:
+            self.logger.error(f"保存最近目录失败: {e}")
 
     def _save_config_now(self):
         # Re-read first: keys edited outside must not be overwritten by the

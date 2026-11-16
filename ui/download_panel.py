@@ -6,7 +6,9 @@ from tkinter import ttk, filedialog, messagebox
 from typing import Callable, Dict, List, Optional
 
 from utils.app_paths import dialog_initial_dir
+from utils.config_manager import RECENT_DIR_MAX, push_recent_dir
 
+from .popdown import fit_combobox_popdown
 from .theme import ellipsize, get_ui_fonts, scale_px
 
 _STATUS_MAX_LINES = 400
@@ -41,13 +43,15 @@ class DownloadPanel(ttk.LabelFrame):
                  on_cancel: Optional[Callable[[], None]] = None,
                  on_refresh: Optional[Callable[[], None]] = None,
                  on_bin_selection_changed: Optional[Callable[[], None]] = None,
-                 on_reload_bin_selection: Optional[Callable[[], None]] = None):
+                 on_reload_bin_selection: Optional[Callable[[], None]] = None,
+                 on_recent_dirs_changed: Optional[Callable[[List[str]], None]] = None):
         super().__init__(master, text="下载")
         self._on_download = on_download
         self._on_cancel = on_cancel
         self._on_refresh = on_refresh
         self._on_bin_selection_changed = on_bin_selection_changed
         self._on_reload_bin_selection = on_reload_bin_selection
+        self._on_recent_dirs_changed = on_recent_dirs_changed
         self._get_chip_files = get_chip_files or (lambda _chip: {})
         self._chip_files = self._get_chip_files(chip_types[0] if chip_types else "")
         self._chip_types = chip_types or ["9032", "9062"]
@@ -70,6 +74,7 @@ class DownloadPanel(ttk.LabelFrame):
         self._manual_selection: Dict[str, bool] = {}      # bin 手动选择标记
         self._id_log_paths: Dict[str, Optional[str]] = {} # id_log 绝对路径（手动选择时）
         self._id_log_manual: Dict[str, bool] = {}         # id_log 手动选择标记
+        self._recent_dirs: List[str] = []                 # 最近用过的 bin 目录（新的在前）
 
         dir_frame = ttk.Frame(self)
         dir_frame.grid(row=0, column=0, columnspan=2, sticky=tk.NSEW, padx=2, pady=2)
@@ -88,9 +93,19 @@ class DownloadPanel(ttk.LabelFrame):
         self.entry_rdelay.pack(side=tk.LEFT, padx=(0, 8))
         ttk.Label(bar1, text="路径").pack(side=tk.LEFT, padx=(0, 2))
         self.bin_dir = tk.StringVar(value="./bin")
-        self.entry_bin_dir = ttk.Entry(
-            bar1, textvariable=self.bin_dir, font=get_ui_fonts().ui_small)
-        self.entry_bin_dir.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2)
+        # 路径下拉：可从最近用过的目录里挑，也能直接输入路径
+        # state="normal" 才能手输（"readonly" 就只能选了）
+        self.cmb_bin_dir = ttk.Combobox(
+            bar1, textvariable=self.bin_dir, values=(),
+            font=get_ui_fonts().ui_small, state="normal")
+        self.cmb_bin_dir.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2)
+        self.cmb_bin_dir.configure(postcommand=self._schedule_recent_popdown)
+        self.cmb_bin_dir.bind("<<ComboboxSelected>>", self._on_recent_dir_selected)
+        self.cmb_bin_dir.bind("<Return>", self._on_bin_dir_entered)
+        self.cmb_bin_dir.bind("<FocusOut>", self._on_bin_dir_left)
+        # 下拉列表的字体要跟输入框一样小：列表用默认大字号时，
+        # 按小字号算出来的下拉宽度装不下文字，路径会被截断（同端口下拉）
+        self._apply_bin_dir_font()
         self.btn_browse_dir = ttk.Button(bar1, text="…", command=self._browse_dir, width=3)
         self.btn_browse_dir.pack(side=tk.LEFT)
 
@@ -210,7 +225,12 @@ class DownloadPanel(ttk.LabelFrame):
 
         self._refresh_enabled = False
         self.chip_type.trace_add("write", lambda *_: self._on_chip_changed())
-        self.bin_dir.trace_add("write", lambda *_: self.refresh_bins())
+        self.bin_dir.trace_add("write", self._on_bin_dir_changed)
+
+    def _on_bin_dir_changed(self, *args):
+        """路径变了：刷新文件列表，并让下拉里能看到当前路径。"""
+        self._sync_dir_values()
+        self.refresh_bins()
 
     def enable_refresh(self):
         self._refresh_enabled = True
@@ -453,7 +473,101 @@ class DownloadPanel(ttk.LabelFrame):
         d = filedialog.askdirectory(initialdir=dialog_initial_dir(self.bin_dir.get()))
         if d:
             self.bin_dir.set(d)
+            self._push_recent_dir(d)
             self.refresh_bins()
+
+    # ---------- 路径下拉：最近用过的目录 ----------
+
+    def set_recent_dirs(self, items: Optional[List[str]] = None):
+        """设置最近用过的目录（新的在前，最多 RECENT_DIR_MAX 条）。
+
+        当前路径也算最近用过的：不在列表里就补到最前面。
+        这样下拉里永远能看到当前用的目录，换成别的目录后它也还留在列表里
+        （同端口下拉：当前端口一直在列表中）。
+        """
+        clean: List[str] = []
+        for item in items or []:
+            p = str(item or "").strip()
+            if not p or p in clean:
+                continue
+            clean.append(p)
+            if len(clean) >= RECENT_DIR_MAX:
+                break
+        cur = self.bin_dir.get().strip()
+        if cur and cur not in clean:
+            clean = push_recent_dir(clean, cur)
+        self._recent_dirs = clean
+        self._sync_dir_values()
+
+    def _sync_dir_values(self):
+        """下拉里的内容：当前路径 + 最近用过的目录（当前排最前）。
+
+        当前路径单独放前面：它可能还没被"用过"（刚从 ini 读进来或正在手输），
+        但下拉里必须能看到它，否则用户会以为路径没记住。
+        """
+        values: List[str] = []
+        cur = self.bin_dir.get().strip()
+        if cur:
+            values.append(cur)
+        for d in self._recent_dirs:
+            if d not in values:
+                values.append(d)
+        self.cmb_bin_dir.configure(values=values)
+
+    def get_recent_dirs(self) -> List[str]:
+        return list(self._recent_dirs)
+
+    def _push_recent_dir(self, path: str):
+        """把用过的目录记进最近列表（新的在前），并通知外部持久化。
+
+        目录不存在就不记：下拉里留一条坏路径，点开才发现是错的。
+        """
+        p = str(path or "").strip()
+        if not p or not os.path.isdir(p):
+            return
+        recent = push_recent_dir(self._recent_dirs, p)
+        if recent == self._recent_dirs:
+            return
+        self.set_recent_dirs(recent)
+        if self._on_recent_dirs_changed is not None:
+            self._on_recent_dirs_changed(list(recent))
+
+    def _on_recent_dir_selected(self, _event=None):
+        """从下拉里选了目录：记进最近列表。"""
+        self._push_recent_dir(self.bin_dir.get())
+
+    def _on_bin_dir_entered(self, _event=None):
+        """手输路径后回车：也记进最近列表。"""
+        self._push_recent_dir(self.bin_dir.get())
+
+    def _on_bin_dir_left(self, _event=None):
+        """离开输入框：手输的路径也要记进最近列表。
+
+        只靠回车不够：手输完路径直接点别的控件（没按回车）时，
+        路径也该被记住，否则下次还得再输一遍。
+        """
+        self._push_recent_dir(self.bin_dir.get())
+
+    def _schedule_recent_popdown(self):
+        """弹出后按最长路径加宽（ttk 默认把下拉压成和输入框一样宽）。"""
+        self.cmb_bin_dir.after(1, self._fit_recent_popdown)
+
+    def _fit_recent_popdown(self):
+        fit_combobox_popdown(self.cmb_bin_dir)
+
+    def _apply_bin_dir_font(self):
+        """路径框与下拉列表用小一号字体（缩放后要重设）。"""
+        font = get_ui_fonts().ui_small
+        try:
+            self.cmb_bin_dir.configure(font=font)
+        except tk.TclError:
+            return
+        try:
+            popdown = self.cmb_bin_dir.tk.call(
+                "ttk::combobox::PopdownWindow", self.cmb_bin_dir)
+            self.cmb_bin_dir.tk.call(f"{popdown}.f.l", "configure", "-font", font)
+        except tk.TclError:
+            pass
 
     def _find_bin_file(
         self, bin_dir: str, keyword: str, chip: Optional[str] = None,
@@ -667,6 +781,7 @@ class DownloadPanel(ttk.LabelFrame):
         if self._fit_font is not None:
             # 复用同一个命名 Tk 字体：每档缩放都新建一个会越攒越多
             self._fit_font.configure(family=fonts.mono, size=fonts.size_mono_sm)
+        self._apply_bin_dir_font()
         for key in self.BINARY_KEYS:
             for lbl in (self._file_labels.get(key), self._id_log_labels.get(key)):
                 if lbl is None:
@@ -801,6 +916,8 @@ class DownloadPanel(ttk.LabelFrame):
     def _do_download(self):
         if self._on_download is None:
             return
+        # 这次真用到的目录也记进最近列表（手输路径后直接点下载的情况）
+        self._push_recent_dir(self.bin_dir.get())
         # 下载前再扫一次目录：编译可能发生在界面上次扫描之后，
         # 不重扫就会照着旧的文件名烧旧版本
         changed = self._rescan_files()
@@ -830,7 +947,7 @@ class DownloadPanel(ttk.LabelFrame):
                 command=self._on_cancel or (lambda: None),
             )
             # 路径 / 芯片 / 浏览 / 刷新 / 开始下载 全部置灰
-            self.entry_bin_dir.configure(state=tk.DISABLED)
+            self.cmb_bin_dir.configure(state="disabled")
             self.btn_browse_dir.configure(state=tk.DISABLED)
             self.chk_reset.configure(state=tk.DISABLED)
             self.entry_rdelay.configure(state=tk.DISABLED)
@@ -854,7 +971,7 @@ class DownloadPanel(ttk.LabelFrame):
                 state=tk.NORMAL, text="开始下载",
                 command=self._do_download,
             )
-            self.entry_bin_dir.configure(state=tk.NORMAL)
+            self.cmb_bin_dir.configure(state="normal")
             self.btn_browse_dir.configure(state=tk.NORMAL)
             self.chk_reset.configure(state=tk.NORMAL)
             self._apply_reset_rdelay_state()
